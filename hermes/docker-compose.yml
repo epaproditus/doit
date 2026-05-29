@@ -1,0 +1,42 @@
+# Optional: run Hermes gateway(s) + the runner together on the VM.
+# For the simplest deploy you can also just run Hermes natively (via the
+# install script) and the runner under systemd — see setup.md.
+#
+# This compose file is intended for the case where you want everything
+# containerized. Each user's Hermes profile is a separate service so each gets
+# its own port + isolated state volume.
+
+services:
+  hermes-alice:
+    image: ghcr.io/nousresearch/hermes-agent:latest
+    container_name: hermes-alice
+    restart: unless-stopped
+    env_file:
+      - ./profiles/alice/.env
+    volumes:
+      - ./profiles/alice/config.yaml:/root/.hermes/config.yaml:ro
+      - hermes-alice-state:/root/.hermes
+    ports:
+      - "127.0.0.1:8643:8643"   # only the runner (on the host) needs this
+    command: ["hermes", "gateway"]
+
+  # Add more hermes-<user> services as you onboard friends. Each needs:
+  #   - its own .env (unique API_SERVER_PORT, API_SERVER_KEY, COMPOSIO_ENTITY_ID)
+  #   - its own config.yaml (copy from profiles/_template/)
+  #   - its own state volume
+  #   - a unique loopback port mapping
+
+  runner:
+    build: ../runner
+    container_name: doit-runner
+    restart: unless-stopped
+    env_file:
+      - ../runner/.env
+    extra_hosts:
+      # so the runner can reach 127.0.0.1:<port> from inside the container
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - hermes-alice
+
+volumes:
+  hermes-alice-state:

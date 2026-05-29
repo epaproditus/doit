@@ -1,0 +1,25 @@
+# Per-user Hermes profile config.
+# Copy this to ~/.hermes/profiles/<user>/config.yaml on the VM, then create
+# the matching .env from .env.example.
+#
+# Each user runs as a separate Hermes profile for isolation:
+#   - Own memory (MEMORY.md, USER.md)
+#   - Own Composio OAuth connections (entity = user_id)
+#   - Own API server port + bearer key
+
+# --- Composio session MCP: one per user ---
+# Create with Composio v3 (`composio.create(user_id=...)`) and paste
+# `session.mcp.url` plus `session.mcp.headers` here.
+mcp_servers:
+  composio:
+    url: "replace-with-session-mcp-url"
+    headers:
+      x-api-key: "replace-with-session-mcp-header-value"
+
+# Keep the agent focused — no terminal/filesystem on the cloud box.
+# Composio is the only tool surface for real-world actions; Hermes' built-in
+# web / vision / image / TTS tools are available via the Nous Portal.
+disabled_toolsets:
+  - terminal
+  - browser
+  - delegate

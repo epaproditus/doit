@@ -1,0 +1,96 @@
+# End-to-end demo: "Email my landlord rent is late"
+
+This is the canonical first demo. It exercises every piece of the system:
+auth, RLS, the runner, Hermes, Composio OAuth, push, and live thinking.
+
+## Prerequisites (one-time)
+
+Follow these in order. Each links to the file with the full instructions.
+
+1. **Supabase** — create the project and apply the schema.
+   See [`supabase/README.md`](supabase/README.md).
+2. **Apple Developer** — enable Sign in with Apple for the Supabase project
+   (same file). Also create an **APNs auth key (`.p8`)** under Keys, download
+   it, and note the Key ID + your Team ID.
+3. **Cloud VM** — provision a Hetzner or DigitalOcean ~4GB Ubuntu box and
+   install Hermes.
+4. **Nous Portal** — `hermes setup --portal` on the VM (gives Hermes the LLM
+   plus web/image/TTS tools).
+5. **Composio** — sign up at <https://composio.dev> and copy the backend
+   project API key. It is used by the Edge Function and to create the per-user
+   Composio session MCP URL for Hermes.
+6. **Edge Function** — deploy:
+   ```bash
+   supabase functions deploy integrations
+   supabase secrets set COMPOSIO_API_KEY=ck_xxx
+   ```
+7. **Create your Hermes profile** on the VM — follow steps 5-6 in
+   [`hermes/setup.md`](hermes/setup.md). End state: one `hermes-<name>` systemd
+   service is `active (running)`, `hermes -p <name> -z "Reply OK"` works, and
+   there's a `user_hermes` row keyed to your Supabase user uuid.
+8. **Deploy the runner** — step 8 in `hermes/setup.md`. Watch
+   `journalctl -u doit-runner -f` to confirm "doit runner online".
+9. **Configure the iOS app**:
+   - Open [`ios/doit/doit.xcodeproj`](ios/doit/doit.xcodeproj) in Xcode.
+   - Edit [`ios/doit/doit/Supabase/SupabaseConfig.swift`](ios/doit/doit/Supabase/SupabaseConfig.swift)
+     with your project URL + anon key.
+   - In Signing & Capabilities: select your team, ensure **Sign in with Apple**
+     and **Push Notifications** capabilities are present (the entitlements file
+     already declares them).
+   - Build & run on a real device (push notifications don't work in the
+     simulator).
+
+## The demo (60 seconds)
+
+1. **Sign in** — Tap "Sign in with Apple", confirm with Face ID.
+2. **Allow notifications** — Tap "Allow" when prompted.
+3. **Connect Gmail (proactive)** — Tap the gear icon top-left -> Integrations
+   list. Tap **Connect** next to Gmail. A Google OAuth screen opens; sign in
+   and approve. The row flips to **Connected**. The same sheet can also connect
+   Google Calendar, Drive, Docs, Sheets, and the other curated toolkits. Close
+   Settings.
+
+   _Skipping this step is fine — the agent will prompt for it inline when it
+   needs it._
+
+4. **Create the todo** — Tap **+**, type
+   > Email my landlord that rent will be 3 days late this month. Be polite,
+   > apologize, and ask if there's a partial-payment option. The landlord's
+   > address is in my recent emails.
+
+   Tap **Save**.
+5. **Tap the todo -> Do it.** The status flips to **Working...** and the
+   Activity section starts filling in with steps in real time:
+   - "Search Gmail for landlord contact"
+   - "Draft email"
+   - "Send email"
+
+   Each row appears as the agent calls that tool.
+6. **Lock your phone.** Wait a few seconds.
+7. **Push notification arrives:** "Done — Email my landlord that rent will be
+   3 days late..."
+8. Tap the push -> jumps back into the todo. Final step shows the summary of
+   what was sent.
+
+## The "needs auth" path
+
+If you skipped step 3 (connecting Gmail proactively):
+
+5. Tap "Do it". After a few seconds the status flips to **Needs you** (orange).
+6. A push appears: "Connect an account — Tap to authorize so the agent can
+   finish."
+7. Tap into the todo -> hit "Connect your account" -> Google OAuth -> approve.
+8. Tap **Do it** again -> the agent picks up where it left off and finishes.
+
+## What to check if it doesn't work
+
+| Symptom | Where to look |
+| --- | --- |
+| Sign-in spins forever | Supabase Apple provider config + your Bundle ID matches Services ID. |
+| Todo stays "Queued" | `journalctl -u doit-runner -f` — runner not picking up rows. Check `SUPABASE_SERVICE_ROLE_KEY`. |
+| Runner logs "no hermes profile" | The `user_hermes` row isn't there for your user_id. |
+| Steps stop appearing mid-run | The Hermes systemd service died — `journalctl -u hermes-<name>`. |
+| No push notifications | APNs `.p8` not mounted, Team ID wrong, or device not registered (check the `devices` table for your user). |
+| "Couldn't load integrations" | Edge Function not deployed or `COMPOSIO_API_KEY` secret not set. |
+| Hermes logs `401 Unauthorized` for Composio MCP | The profile is probably using the static `connect.composio.dev/mcp` URL. Generate a Composio v3 session with `Composio().create(user_id=...)` and paste `session.mcp.url` + `session.mcp.headers` into the profile config. |
+| OAuth screen errors out | Verify in `hermes mcp` that Composio is connected for the profile; try the manual sanity check in `hermes/setup.md` step 7. |

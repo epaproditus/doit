@@ -1,0 +1,35 @@
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/**/build/
+ios/**/DerivedData/
+ios/**/.build/
+ios/**/Pods/
+
+# Python (runner)
+runner/__pycache__/
+runner/*.pyc
+runner/.venv/
+runner/venv/
+runner/.env
+
+# Secrets / local config
+**/.env
+**/.env.local
+*.p8
+*.p12
+
+# Hermes deploy artifacts
+hermes/profiles/*/.env
+hermes/profiles/*/hermes_state/
+hermes/profiles/*/mcp-tokens/
+
+# Supabase CLI
+supabase/.temp/
+supabase/.branches/
