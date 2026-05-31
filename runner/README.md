@@ -80,6 +80,37 @@ python -m unittest discover -s tests -v
 See `../hermes/setup.md` for the full provisioning runbook. The runner is the
 last step there.
 
+### Shipping a change
+
+After the first-time systemd setup is done, deploying a new version is a
+one-liner from the repo root on your dev machine:
+
+```bash
+./scripts/deploy-runner.sh
+```
+
+That rsyncs `runner/runner/` to the VM and restarts `doit-runner`. It
+deliberately excludes `.venv` (platform-specific) and `.env` (real secrets
+live only on the VM), so it's safe to re-run.
+
+Targeting a different VM is just env overrides — the defaults match the
+current droplet:
+
+```bash
+DOIT_VM_HOST=root@<other-ip> DOIT_VM_PATH=/srv/doit/runner \
+  ./scripts/deploy-runner.sh
+```
+
+If `requirements.txt` changed, ssh in once afterwards and refresh the venv:
+
+```bash
+ssh "$DOIT_VM_HOST" '
+  cd /opt/doit/runner &&
+  .venv/bin/pip install -r requirements.txt &&
+  systemctl restart doit-runner
+'
+```
+
 ## Notes
 
 - The runner uses Supabase's **service_role** key so its writes bypass RLS.
