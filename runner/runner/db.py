@@ -150,6 +150,54 @@ class DB:
         rows = resp.data or []
         return rows[0] if rows else None
 
+    def list_todo_attachments(self, todo_id: str) -> list[dict]:
+        """All image attachments for a todo, oldest first.
+
+        We keep the order stable so the agent sees images in the order the
+        user added them. The runner re-signs each row's storage path right
+        before building the prompt — see ``sign_attachment_url``.
+        """
+        try:
+            resp = (
+                self._client.table("todo_attachments")
+                .select("*")
+                .eq("todo_id", todo_id)
+                .order("created_at")
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            log.error("list_todo_attachments(%s) failed: %s", todo_id, e)
+            return []
+
+    def sign_attachment_url(
+        self,
+        storage_path: str,
+        *,
+        ttl_seconds: int = 24 * 60 * 60,
+    ) -> str | None:
+        """Generate a short-lived signed URL for an attachment.
+
+        TTL defaults to 24 hours: long enough that a single agent run can
+        finish (with some interactive back-and-forth) but short enough that
+        leaked URLs don't stay live forever. URLs are intentionally re-signed
+        every time the runner builds a prompt, so even on resumes that span
+        the TTL the agent always gets a fresh URL.
+        """
+        try:
+            resp = self._client.storage.from_("todo-attachments").create_signed_url(
+                storage_path,
+                ttl_seconds,
+            )
+            # supabase-py returns either {"signedURL": "..."} or
+            # {"signedUrl": "..."} depending on version.
+            if isinstance(resp, dict):
+                return resp.get("signedURL") or resp.get("signedUrl")
+            return None
+        except Exception as e:
+            log.error("sign_attachment_url(%s) failed: %s", storage_path, e)
+            return None
+
     def list_apns_tokens(self, user_id: str) -> list[str]:
         resp = (
             self._client.table("devices")
@@ -345,6 +393,26 @@ class DB:
         except Exception as e:
             log.error("insert_step(%s, %s) failed: %s", todo_id, kind, e)
 
+    def increment_todo_tokens(self, todo_id: str, delta: int) -> None:
+        """Atomically bump `todos.total_tokens` by `delta` via the
+        `increment_todo_tokens(uuid, bigint)` Postgres RPC.
+
+        Negative or zero deltas are dropped client-side so we don't make a
+        round trip when the caller already knows there's nothing to add.
+        """
+        if delta <= 0:
+            return
+        try:
+            self._client.rpc(
+                "increment_todo_tokens",
+                {"p_todo_id": todo_id, "p_delta": int(delta)},
+            ).execute()
+        except Exception as e:
+            log.error(
+                "increment_todo_tokens(%s, %d) failed: %s",
+                todo_id, delta, e,
+            )
+
     # ------------------------------------------------------------------
     # Interactions (structured ask-the-user)
     # ------------------------------------------------------------------
@@ -447,3 +515,88 @@ class DB:
             ).execute()
         except Exception as e:
             log.error("mark_interaction(%s, %s) failed: %s", interaction_id, status, e)
+
+    # ------------------------------------------------------------------
+    # Free-form user chat messages
+    # ------------------------------------------------------------------
+
+    def get_unconsumed_user_messages(self, todo_id: str) -> list[dict]:
+        """Messages the user sent that haven't been folded into a prompt yet.
+
+        Returned oldest-first so the runner can quote them in conversational
+        order when it weaves them into the next Hermes turn.
+        """
+        try:
+            resp = (
+                self._client.table("todo_messages")
+                .select("*")
+                .eq("todo_id", todo_id)
+                .is_("consumed_at", "null")
+                .order("created_at")
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            log.error("get_unconsumed_user_messages(%s) failed: %s", todo_id, e)
+            return []
+
+    def mark_user_messages_consumed(self, message_ids: list[str]) -> None:
+        """Stamp `consumed_at` on every message we just put in a prompt.
+
+        Done in a single update so a slow runner can't double-include the
+        same message in a follow-up resume.
+        """
+        if not message_ids:
+            return
+        try:
+            self._client.table("todo_messages").update(
+                {"consumed_at": datetime.now(UTC).isoformat()}
+            ).in_("id", message_ids).execute()
+        except Exception as e:
+            log.error(
+                "mark_user_messages_consumed(%d ids) failed: %s",
+                len(message_ids),
+                e,
+            )
+
+    # ------------------------------------------------------------------
+    # Artifacts (user-visible deliverables)
+    # ------------------------------------------------------------------
+
+    def upsert_artifact(
+        self,
+        *,
+        todo_id: str,
+        user_id: str,
+        key: str,
+        kind: str,
+        title: str | None,
+        payload: dict[str, Any] | None,
+        hermes_run_id: str | None = None,
+    ) -> None:
+        """Insert or update a ``todo_artifacts`` row keyed on (todo_id, key).
+
+        The agent reuses ``key`` across turns to update a previously-emitted
+        artifact in place (e.g. swap a draft URL for a final one), so we
+        rely on the table's ``unique (todo_id, artifact_key)`` constraint
+        with PostgREST's ``on_conflict`` to avoid duplicates.
+        """
+        row: dict[str, Any] = {
+            "todo_id": todo_id,
+            "user_id": user_id,
+            "artifact_key": key,
+            "kind": kind,
+            "title": title,
+            "payload": payload or {},
+            "hermes_run_id": hermes_run_id,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            self._client.table("todo_artifacts").upsert(
+                row, on_conflict="todo_id,artifact_key"
+            ).execute()
+        except Exception as e:
+            log.error(
+                "upsert_artifact(todo=%s, key=%s) failed: %s",
+                todo_id, key, e,
+            )

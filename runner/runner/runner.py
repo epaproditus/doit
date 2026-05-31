@@ -11,7 +11,7 @@ import httpx
 
 from .config import Config, load
 from .db import DB
-from .events import extract_terminal_text, translate
+from .events import extract_terminal_text, extract_usage_total, translate
 from .hermes import HermesClient
 from .hermes_memory import (
     HermesMemoryStore,
@@ -26,6 +26,7 @@ from .prepare import (
     parse_prepare,
 )
 from .prompt import (
+    build_followup_prompt as _build_followup_prompt,
     build_prompt as _build_prompt,
     build_resume_prompt as _build_resume_prompt,
     prep_session_id_for_user as _prep_session_id_for_user,
@@ -43,6 +44,24 @@ def setup_logging() -> None:
     )
 
 
+def _resolve_attachment_urls(db: DB, todo_id: str) -> list[str]:
+    """Look up attachments for a todo and return a list of fresh signed URLs.
+
+    Failures are non-fatal: a single missing signed URL means we drop that
+    one entry, but we never block execution because of attachment plumbing.
+    """
+    rows = db.list_todo_attachments(todo_id)
+    urls: list[str] = []
+    for row in rows:
+        path = row.get("storage_path")
+        if not path:
+            continue
+        url = db.sign_attachment_url(path)
+        if url:
+            urls.append(url)
+    return urls
+
+
 async def run_one_todo(
     cfg: Config,
     db: DB,
@@ -53,6 +72,14 @@ async def run_one_todo(
     user_id = todo["user_id"]
     title = todo["title"]
     detail = todo.get("detail") or ""
+    original_title = todo.get("original_title") or ""
+    preparation_summary = todo.get("preparation_summary") or ""
+    connection_slug = todo.get("connection_slug") or ""
+
+    # Sign attachment URLs fresh every iteration so resumes that cross the
+    # TTL still get URLs the agent can fetch. ``vision_analyze`` only ever
+    # sees these once they're embedded in the prompt below.
+    attachment_urls = _resolve_attachment_urls(db, todo_id)
 
     # If the user just answered an interaction the agent posted earlier, treat
     # this re-claim as a resume: short-circuit "cancel" responses, otherwise
@@ -64,6 +91,14 @@ async def run_one_todo(
     # not leak into the execution prompt (they're a different conversation).
     if resume is not None and (resume.get("payload") or {}).get("phase") == "prepare":
         resume = None
+
+    # Free-form chat messages the user typed in the detail view composer.
+    # These are stamped consumed_at below once they actually make it into
+    # a prompt so the next resume doesn't replay them.
+    pending_messages = db.get_unconsumed_user_messages(todo_id)
+    pending_bodies = [m.get("body") or "" for m in pending_messages]
+    pending_ids = [str(m["id"]) for m in pending_messages]
+
     if resume is not None:
         response = resume.get("response") or {}
         option_id = str(response.get("option_id") or "").lower()
@@ -81,14 +116,56 @@ async def run_one_todo(
                 kind="error",
                 text="Cancelled by user.",
             )
+            # Drop any unsent messages too; the user just cancelled the task.
+            if pending_ids:
+                db.mark_user_messages_consumed(pending_ids)
             return
         prompt = _build_resume_prompt(
             title=title,
             detail=detail,
             interaction=resume,
+            original_title=original_title,
+            preparation_summary=preparation_summary,
+            connection_slug=connection_slug,
+            attachment_urls=attachment_urls,
         )
+        # If the user happened to also type a free-form message alongside
+        # the interaction response, tack it onto the same prompt so the
+        # agent sees both pieces in one turn.
+        if pending_bodies:
+            quoted = "\n".join(
+                f"  > {line}"
+                for body in pending_bodies
+                for line in (body.strip().splitlines() or [""])
+                if body.strip()
+            )
+            if quoted:
+                prompt = (
+                    f"{prompt}\n\n"
+                    "The user also sent these follow-up messages:\n"
+                    f"{quoted}"
+                )
+            db.mark_user_messages_consumed(pending_ids)
+    elif pending_bodies:
+        prompt = _build_followup_prompt(
+            title,
+            detail,
+            messages=pending_bodies,
+            original_title=original_title,
+            preparation_summary=preparation_summary,
+            connection_slug=connection_slug,
+            attachment_urls=attachment_urls,
+        )
+        db.mark_user_messages_consumed(pending_ids)
     else:
-        prompt = _build_prompt(title, detail)
+        prompt = _build_prompt(
+            title,
+            detail,
+            original_title=original_title,
+            preparation_summary=preparation_summary,
+            connection_slug=connection_slug,
+            attachment_urls=attachment_urls,
+        )
 
     log.info("processing todo %s user=%s title=%r", todo_id, user_id, title)
 
@@ -354,6 +431,7 @@ async def prepare_one_todo(
         detail=detail,
         allowed_slugs=CONNECTION_SLUGS,
         prior=prior,
+        attachment_urls=_resolve_attachment_urls(db, todo_id),
     )
     session_id = _prep_session_id_for_user(user_id)
 
@@ -475,6 +553,10 @@ async def _consume_run(
     todo_id = todo["id"]
     user_id = todo["user_id"]
     terminal: str | None = None
+    # Sum of per-turn usage we've already pushed to `todos.total_tokens`
+    # for THIS run. Used to compute a delta against the authoritative
+    # run total when the SSE stream ends.
+    live_total: int = 0
 
     async for ev in hermes.stream_events(run_id):
         effect = translate(ev.event, ev.data)
@@ -489,6 +571,27 @@ async def _consume_run(
                 url=effect.url,
                 tool_name=effect.tool_name,
             )
+        # Persist artifacts before any terminal `break` below so a `done`
+        # event that also carries deliverables still lands them in the DB.
+        for artifact in effect.artifacts:
+            db.upsert_artifact(
+                todo_id=todo_id,
+                user_id=user_id,
+                key=artifact.key,
+                kind=artifact.kind,
+                title=artifact.title,
+                payload=artifact.payload,
+                hermes_run_id=run_id,
+            )
+        # Mid-stream `response.completed` events carry per-turn usage; we
+        # increment as they arrive so the iOS pill counter ticks upward
+        # while the agent is still working. We deliberately skip events
+        # that also carry `new_status` because those terminal events tend
+        # to repeat the run-cumulative total — we let the post-stream
+        # backfill (`get_run`) reconcile those instead of double-counting.
+        if effect.usage_total > 0 and effect.new_status is None:
+            db.increment_todo_tokens(todo_id, effect.usage_total)
+            live_total += effect.usage_total
         if effect.new_status:
             fields: dict = {"status": effect.new_status}
             if effect.new_status == "done":
@@ -513,6 +616,7 @@ async def _consume_run(
                 )
                 # The run usually pauses here in practice; we stop consuming
                 # so the next "Do it" can resume cleanly with fresh creds.
+                await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
                 return "needs_auth"
 
             if effect.new_status == "needs_input" and effect.interaction is not None:
@@ -536,6 +640,7 @@ async def _consume_run(
                         kind="needs_input",
                     ),
                 )
+                await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
                 return "needs_input"
 
             if effect.new_status in ("done", "failed"):
@@ -557,7 +662,39 @@ async def _consume_run(
     if terminal in ("done", "failed"):
         db.supersede_open_interactions(todo_id)
 
+    await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
+
     return terminal
+
+
+async def _reconcile_run_tokens(
+    db: DB,
+    hermes: HermesClient,
+    todo_id: str,
+    run_id: str,
+    live_total: int,
+) -> None:
+    """Top up `todos.total_tokens` with whatever we missed from the SSE stream.
+
+    Hermes' `GET /v1/runs/{id}` returns `usage.total_tokens` for the whole
+    run on terminal state. If that authoritative number is higher than the
+    sum we accumulated from per-turn `response.completed` events, the
+    difference gets added so the lifetime counter stays accurate.
+    """
+    try:
+        snapshot = await hermes.get_run(run_id)
+    except Exception as e:
+        log.warning("get_run %s for token reconcile failed: %s", run_id, e)
+        return
+    authoritative = extract_usage_total(snapshot.get("usage"))
+    if authoritative <= live_total:
+        return
+    delta = authoritative - live_total
+    log.info(
+        "reconcile tokens todo=%s run=%s live=%d auth=%d delta=%d",
+        todo_id, run_id, live_total, authoritative, delta,
+    )
+    db.increment_todo_tokens(todo_id, delta)
 
 
 async def _watch_for_cancel(

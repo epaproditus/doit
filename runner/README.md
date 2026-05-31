@@ -109,6 +109,19 @@ last step there.
   same `session_id=todo-{id}` so the conversation stays coherent. Option
   `id="cancel"` is a special case: the runner short-circuits and marks the
   todo `cancelled` without starting a new Hermes run.
+- Artifacts (user-visible deliverables): when a task produces something the
+  user should see at a glance — a created Google Sheet/Doc link, a sent
+  email, a calendar invite, or a short text result — the agent wraps each
+  one in `[[DOIT_ARTIFACT]] ... [[/DOIT_ARTIFACT]]` in its final reply. The
+  block carries `key` (stable per-todo id for updates), `type`
+  (`link` | `email` | `calendar` | `text`), a short `title`, and a
+  type-specific `payload` (e.g. `{"url":"…","provider":"googlesheets"}` for
+  link). The runner parses every block via `parse_artifacts`, strips them
+  from the rendered final step so the chat stays clean, and upserts one
+  row per `key` into `todo_artifacts` (unique on `(todo_id, artifact_key)`).
+  The iOS detail view subscribes to that table and renders each artifact
+  as a compact card under the task title. The agent can re-emit a block
+  with the same `key` in a later turn to update an existing card in place.
 - Model settings: the iOS app writes allowlisted choices through the
   `agent-settings` Edge Function. The runner reads pending settings with
   `service_role`, copies Doit's global provider key from `OPENAI_API_KEY` or

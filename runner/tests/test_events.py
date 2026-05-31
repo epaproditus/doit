@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import unittest
 
-from runner.events import INTERACTION_CLOSE, INTERACTION_OPEN, parse_interaction
+from runner.events import (
+    INTERACTION_CLOSE,
+    INTERACTION_OPEN,
+    extract_usage_total,
+    parse_interaction,
+    translate,
+)
 
 
 def wrap(json_body: str) -> str:
@@ -85,6 +91,88 @@ class ParseInteractionTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.prompt, "Send the thing?")
+
+
+class ExtractUsageTotalTests(unittest.TestCase):
+    """Hermes Runs API uses input/output/total_tokens; chat.completions
+    uses prompt/completion_tokens. The helper accepts either shape."""
+
+    def test_runs_api_shape(self) -> None:
+        usage = {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250}
+        self.assertEqual(extract_usage_total(usage), 250)
+
+    def test_chat_completions_shape(self) -> None:
+        usage = {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
+        self.assertEqual(extract_usage_total(usage), 46)
+
+    def test_falls_back_to_sum_when_total_missing(self) -> None:
+        usage = {"input_tokens": 50, "output_tokens": 200}
+        self.assertEqual(extract_usage_total(usage), 250)
+
+    def test_handles_none_and_empty(self) -> None:
+        self.assertEqual(extract_usage_total(None), 0)
+        self.assertEqual(extract_usage_total({}), 0)
+        self.assertEqual(extract_usage_total("garbage"), 0)
+
+    def test_negative_total_is_clamped_to_zero(self) -> None:
+        # `total_tokens=-1` is nonsense; the helper rejects it and falls
+        # through to the sum branch (which is 0 here).
+        usage = {"total_tokens": -1}
+        self.assertEqual(extract_usage_total(usage), 0)
+
+
+class TranslateUsageTests(unittest.TestCase):
+    """The translator should surface the per-event token total on
+    `Translated.usage_total` so the runner can increment the DB without
+    re-parsing event payloads itself."""
+
+    def test_response_completed_carries_usage(self) -> None:
+        data = {
+            "event": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                    }
+                ],
+                "usage": {"input_tokens": 100, "output_tokens": 200, "total_tokens": 300},
+            },
+        }
+        result = translate("response.completed", data)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.usage_total, 300)
+
+    def test_run_completed_carries_usage(self) -> None:
+        data = {
+            "event": "run.completed",
+            "output": "All done.",
+            "usage": {"total_tokens": 1234},
+        }
+        result = translate("run.completed", data)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.usage_total, 1234)
+
+    def test_chat_completions_final_carries_usage(self) -> None:
+        data = {
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": "Hi."}}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+        result = translate("done", data)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.usage_total, 30)
+
+    def test_event_without_usage_defaults_to_zero(self) -> None:
+        data = {"event": "tool.started", "tool": "search"}
+        result = translate("tool.started", data)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.usage_total, 0)
 
 
 if __name__ == "__main__":

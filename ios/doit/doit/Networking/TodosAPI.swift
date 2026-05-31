@@ -70,6 +70,61 @@ enum TodosAPI {
             .value
     }
 
+    // MARK: - Artifacts
+
+    /// Lists every artifact the agent has produced for a todo, oldest
+    /// first. The runner upserts on `(todo_id, artifact_key)` so a given
+    /// `artifact_key` only appears once and re-emitting it from a later
+    /// run replaces the row in place rather than appending a new one.
+    static func artifacts(for todoID: UUID) async throws -> [TodoArtifact] {
+        try await Supa.client
+            .from("todo_artifacts")
+            .select()
+            .eq("todo_id", value: todoID)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+    }
+
+    // MARK: - Messages (free-form user chat)
+
+    /// All user-authored chat messages for a todo, oldest first. The
+    /// detail view interleaves these with `todo_steps` to render a
+    /// conversational timeline.
+    static func messages(for todoID: UUID) async throws -> [TodoMessage] {
+        try await Supa.client
+            .from("todo_messages")
+            .select()
+            .eq("todo_id", value: todoID)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+    }
+
+    /// Insert a free-form chat message and re-queue the todo so the runner
+    /// resumes the same Hermes session with this message woven into the
+    /// prompt. Returns the persisted row so callers can append it locally
+    /// without waiting on a realtime round-trip.
+    @discardableResult
+    static func sendMessage(
+        todoID: UUID,
+        userID: UUID,
+        body: String
+    ) async throws -> TodoMessage {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw TodosAPIError.empty }
+        let row = NewTodoMessage(todo_id: todoID, user_id: userID, body: trimmed)
+        let inserted: [TodoMessage] = try await Supa.client
+            .from("todo_messages")
+            .insert(row)
+            .select()
+            .execute()
+            .value
+        guard let message = inserted.first else { throw TodosAPIError.empty }
+        try await setStatus(todoID, .requested)
+        return message
+    }
+
     // MARK: - Interactions
 
     static func openInteraction(for todoID: UUID) async throws -> TodoInteraction? {

@@ -83,6 +83,14 @@ SYSTEM_INSTRUCTIONS = (
     "primary option, and set allow_freeform=true. After emitting the block, "
     "stop. Doit will surface your question to the user and resume you with "
     "their response.\n\n"
+    "ATTACHMENTS. When the user attached photos to the task, the prompt ends "
+    "with an 'Attachments (images):' block listing one signed URL per image. "
+    "These URLs expire, so don't ask the user to re-share them — the runner "
+    "regenerates them every iteration. When the task requires looking at the "
+    "images (\"What's in this picture?\", \"Add this receipt to the email\", "
+    "\"Caption these photos\"), call vision_analyze on those URLs directly. "
+    "If the task doesn't actually depend on the images, ignore the block "
+    "rather than wasting a tool call on it.\n\n"
     "When you finish the task, end your final reply with a one-line summary of "
     "what you did."
 )
@@ -133,6 +141,18 @@ class HermesClient:
             await self._client.post(f"/v1/runs/{run_id}/stop")
         except httpx.HTTPError as e:
             log.warning("stop_run %s failed: %s", run_id, e)
+
+    async def get_run(self, run_id: str) -> dict:
+        """GET /v1/runs/{run_id}. Used to backfill authoritative usage after
+        the SSE stream ends.
+
+        Hermes retains terminal run state briefly — long enough to read
+        ``usage.total_tokens`` once the stream has closed.
+        """
+        resp = await self._client.get(f"/v1/runs/{run_id}")
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
 
     async def stream_events(self, run_id: str) -> AsyncIterator[HermesEvent]:
         """Consume /v1/runs/{id}/events. Yields HermesEvent until terminal."""

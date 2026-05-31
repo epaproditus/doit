@@ -11,14 +11,15 @@ enum TodoStatus: String, Codable, Sendable, CaseIterable {
     case failed
     case cancelled
 
+    /// Short, colloquial labels surfaced in the detail view header. The
+    /// runner has finer-grained internal states (`preparing`, `requested`,
+    /// `running`) but they all collapse to "Doing" here — users only care
+    /// that something is in flight, not which sub-phase.
     var label: String {
         switch self {
-        case .preparing: return "Preparing"
-        case .todo: return "To do"
-        case .requested: return "Queued"
-        case .running: return "Working..."
-        case .needs_auth: return "Needs you"
-        case .needs_input: return "Needs you"
+        case .todo: return "Todo"
+        case .preparing, .requested, .running: return "Doing"
+        case .needs_auth, .needs_input: return "Waiting for you…"
         case .done: return "Done"
         case .failed: return "Failed"
         case .cancelled: return "Cancelled"
@@ -56,6 +57,11 @@ struct Todo: Codable, Identifiable, Hashable, Sendable {
     /// Short human-readable summary of what the agent plans to do, written
     /// during the preparation phase.
     var preparation_summary: String?
+    /// Lifetime sum of LLM tokens consumed by this todo across every run /
+    /// rerun. Populated by the runner from Hermes' per-turn `usage` blocks
+    /// on the SSE stream (and reconciled against `GET /v1/runs/{id}` once
+    /// each run ends). Optional so older rows decode cleanly; treat nil as 0.
+    var total_tokens: Int64?
     let created_at: Date
     let updated_at: Date
     var completed_at: Date?

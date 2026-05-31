@@ -197,6 +197,7 @@ def build_prepare_prompt(
     detail: str,
     allowed_slugs: frozenset[str] | set[str] = CONNECTION_SLUGS,
     prior: dict[str, Any] | None = None,
+    attachment_urls: list[str] | None = None,
 ) -> str:
     """Build the per-todo input the runner sends to Hermes for preparation.
 
@@ -204,6 +205,12 @@ def build_prepare_prompt(
     answered a clarifying question and we are re-running preparation. It
     must look like a row from ``todo_interactions``: at least ``prompt``,
     ``payload``, and ``response``.
+
+    ``attachment_urls`` are short-lived signed URLs to user-attached images.
+    The preparation pass usually shouldn't call ``vision_analyze`` itself —
+    that is the execution phase's job — but knowing that images are
+    attached helps it pick the right ``connection_slug`` and write a
+    sharper title.
     """
     task = f"{title}\n\n{detail}".strip() if detail else title
     slugs = ", ".join(sorted(allowed_slugs))
@@ -229,7 +236,13 @@ def build_prepare_prompt(
             "ready=true unless something materially new is still missing. "
             "Do not ask the same question again."
         )
-    return "\n".join(lines)
+    base = "\n".join(lines)
+
+    # Reuse the same Attachments block format as the execution prompt so the
+    # agent recognizes it across phases.
+    from .prompt import _append_attachments
+
+    return _append_attachments(base, attachment_urls)
 
 
 # ----------------------------------------------------------------------

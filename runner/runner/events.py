@@ -14,6 +14,17 @@ log = logging.getLogger(__name__)
 INTERACTION_OPEN = "[[DOIT_INTERACTION]]"
 INTERACTION_CLOSE = "[[/DOIT_INTERACTION]]"
 
+# Marker the agent uses to surface a user-facing deliverable (a created
+# doc/sheet link, a sent email, a calendar invite, a text result) in its
+# final reply. Multiple blocks per reply are allowed; each block becomes
+# one row in ``todo_artifacts`` keyed by ``artifact_key``.
+ARTIFACT_OPEN = "[[DOIT_ARTIFACT]]"
+ARTIFACT_CLOSE = "[[/DOIT_ARTIFACT]]"
+
+# Kinds we know how to render on iOS. Anything else is dropped on the floor
+# rather than persisted with an unknown kind, since the UI has no fallback.
+_ARTIFACT_KINDS = {"link", "email", "calendar", "text"}
+
 # Anything that smells like a Composio OAuth redirect URL the user must visit.
 # Composio surfaces these via its connection meta-tools; the exact host varies
 # by upstream provider, so we accept any HTTPS URL emitted by a connection tool.
@@ -24,12 +35,36 @@ _INTERACTION_RE = re.compile(
     re.DOTALL,
 )
 
+# Captures *everything* between the markers so a malformed first block can't
+# greedily swallow a well-formed second one (the JSON braces alone aren't a
+# safe stop condition when the inner JSON is broken). The captured body is
+# stripped and JSON-parsed separately in ``parse_artifacts``.
+_ARTIFACT_RE = re.compile(
+    re.escape(ARTIFACT_OPEN) + r"(.*?)" + re.escape(ARTIFACT_CLOSE),
+    re.DOTALL,
+)
+
 
 @dataclass
 class InteractionRequest:
     """Structured ask-the-user request parsed from the model's final reply."""
     kind: str
     prompt: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ArtifactRequest:
+    """User-visible deliverable parsed from the model's final reply.
+
+    ``key`` is a stable per-todo identifier the agent can reuse to update
+    an artifact in place (e.g. swap a draft URL for the final one). The
+    parser falls back to ``kind`` when the agent omits it so a single-
+    artifact reply still works without ceremony.
+    """
+    key: str
+    kind: str
+    title: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -53,9 +88,36 @@ class Translated:
     ] | None = None
     final_text: str | None = None  # accumulated assistant final text
     interaction: InteractionRequest | None = None
+    artifacts: list[ArtifactRequest] = field(default_factory=list)
+    # Cumulative token total reported by this event for the *current* turn /
+    # run. The runner derives a delta from successive values and increments
+    # `todos.total_tokens` atomically. Zero means "no usage info on this
+    # event" — events without a `usage` block leave this at 0 and the runner
+    # ignores them.
+    usage_total: int = 0
 
 
 _CONNECTION_TOOL_HINTS = ("connect", "composio_manage_connections", "composio_wait")
+
+
+def extract_usage_total(blob: Any) -> int:
+    """Pull a single token total out of a Hermes/OpenAI `usage` blob.
+
+    Hermes' Runs API normalizes to ``input_tokens`` / ``output_tokens`` /
+    ``total_tokens``, but Chat-Completions-style chunks use the legacy
+    ``prompt_tokens`` / ``completion_tokens`` / ``total_tokens`` shape. We
+    accept either and fall back to the sum if ``total_tokens`` is missing.
+    """
+    if not isinstance(blob, dict):
+        return 0
+    total = blob.get("total_tokens")
+    if isinstance(total, int) and total >= 0:
+        return total
+    inp = blob.get("input_tokens", blob.get("prompt_tokens"))
+    out = blob.get("output_tokens", blob.get("completion_tokens"))
+    inp_i = int(inp) if isinstance(inp, (int, float)) else 0
+    out_i = int(out) if isinstance(out, (int, float)) else 0
+    return max(0, inp_i + out_i)
 
 
 def _looks_like_oauth_url(text: str, tool_name: str | None) -> str | None:
@@ -133,14 +195,21 @@ def translate(event_name: str, data: dict) -> Translated | None:
 
     if actual_event == "reasoning.available":
         text = str(data.get("text") or "").strip()
-        if INTERACTION_OPEN in text or INTERACTION_CLOSE in text:
+        if (
+            INTERACTION_OPEN in text
+            or INTERACTION_CLOSE in text
+            or ARTIFACT_OPEN in text
+            or ARTIFACT_CLOSE in text
+        ):
             return None
         if text:
             return Translated(step_kind="thought", text=_truncate(text, 1000))
 
     if actual_event == "run.completed":
         text = str(data.get("output") or "").strip()
-        return _final_or_interaction(text)
+        result = _final_or_interaction(text)
+        result.usage_total = extract_usage_total(data.get("usage"))
+        return result
 
     # ----- tool start (Hermes-custom event on Chat Completions stream) -----
     if actual_event == "hermes.tool.progress":
@@ -185,7 +254,11 @@ def translate(event_name: str, data: dict) -> Translated | None:
     if actual_event == "response.completed":
         resp = data.get("response") or {}
         text = _extract_final_text(resp)
-        return _final_or_interaction(text)
+        result = _final_or_interaction(text)
+        # Hermes fires `response.completed` once per LLM turn, so this is
+        # the main live source of usage during a multi-tool-call run.
+        result.usage_total = extract_usage_total(resp.get("usage"))
+        return result
 
     # ----- chat.completions style final -----
     if actual_event in ("done", "message", "") and data.get("choices"):
@@ -193,7 +266,9 @@ def translate(event_name: str, data: dict) -> Translated | None:
         finish = choice.get("finish_reason")
         if finish in ("stop", "length"):
             msg = (choice.get("message") or {}).get("content") or ""
-            return _final_or_interaction(msg)
+            result = _final_or_interaction(msg)
+            result.usage_total = extract_usage_total(data.get("usage"))
+            return result
 
     # ----- explicit run lifecycle -----
     if actual_event in ("run.completed", "response.completed"):
@@ -210,6 +285,10 @@ def _final_or_interaction(text: str) -> Translated:
     text = (text or "").strip()
     interaction = parse_interaction(text)
     if interaction is not None:
+        # Interaction takes precedence: the agent is pausing, not delivering.
+        # Any artifact blocks in the same reply are ignored — the agent
+        # should re-emit them with its real final reply once the user
+        # answers.
         prompt = interaction.prompt or "The agent needs your input."
         return Translated(
             step_kind="input_needed",
@@ -218,11 +297,16 @@ def _final_or_interaction(text: str) -> Translated:
             final_text=text,
             interaction=interaction,
         )
+    # Real final: parse out any artifact blocks and remove them from the
+    # rendered step text so the user doesn't see the raw JSON in chat.
+    artifacts = parse_artifacts(text)
+    visible = strip_artifacts(text).strip()
     return Translated(
         step_kind="final",
-        text=_truncate(text, 2000) if text else "Done.",
+        text=_truncate(visible, 2000) if visible else "Done.",
         new_status="done",
         final_text=text,
+        artifacts=artifacts,
     )
 
 
@@ -269,6 +353,70 @@ def parse_interaction(text: str) -> InteractionRequest | None:
         payload.pop("options", None)
 
     return InteractionRequest(kind=raw_kind, prompt=prompt[:500], payload=payload)
+
+
+def parse_artifacts(text: str) -> list[ArtifactRequest]:
+    """Extract every ``[[DOIT_ARTIFACT]]`` block from the model's final reply.
+
+    Each block must be a single JSON object with at least ``type`` (one of
+    the renderable kinds). ``key`` is optional and defaults to ``type`` so
+    a single-artifact reply doesn't require the agent to invent an id;
+    follow-up replies that want to update an artifact must supply the same
+    ``key`` to hit the ``(todo_id, artifact_key)`` upsert key.
+
+    Malformed blocks (bad JSON, unknown ``type``, non-object) are skipped
+    rather than raising — surfacing nothing is friendlier than crashing the
+    run because the model added an extra comma.
+    """
+    if not text:
+        return []
+    out: list[ArtifactRequest] = []
+    seen_keys: set[str] = set()
+    for raw_body in _ARTIFACT_RE.findall(text):
+        try:
+            data = json.loads(raw_body.strip())
+        except json.JSONDecodeError as e:
+            log.warning("artifact block JSON parse failed: %s", e)
+            continue
+        if not isinstance(data, dict):
+            continue
+        kind = str(data.get("type") or data.get("kind") or "").strip().lower()
+        if kind not in _ARTIFACT_KINDS:
+            log.warning("artifact block has unknown type=%r; skipping", kind)
+            continue
+        key = str(data.get("key") or kind).strip()[:64] or kind
+        title_raw = data.get("title")
+        title = str(title_raw).strip()[:200] if title_raw else None
+        payload_raw = data.get("payload")
+        payload = payload_raw if isinstance(payload_raw, dict) else {}
+        # Deduplicate within one reply on the same key: the agent gets one
+        # row per key per turn; later blocks win, matching the upsert
+        # semantics in `db.upsert_artifact`.
+        if key in seen_keys:
+            for i, existing in enumerate(out):
+                if existing.key == key:
+                    out[i] = ArtifactRequest(
+                        key=key, kind=kind, title=title, payload=payload
+                    )
+                    break
+            continue
+        seen_keys.add(key)
+        out.append(
+            ArtifactRequest(key=key, kind=kind, title=title, payload=payload)
+        )
+    return out
+
+
+def strip_artifacts(text: str) -> str:
+    """Remove every ``[[DOIT_ARTIFACT]] … [[/DOIT_ARTIFACT]]`` block from text.
+
+    Used to keep the displayed ``final`` step free of raw JSON. The
+    enclosing markers are dropped along with the JSON body; surrounding
+    whitespace is left to the caller to trim.
+    """
+    if not text:
+        return text
+    return _ARTIFACT_RE.sub("", text)
 
 
 def _clean_option(option: Any) -> dict[str, Any] | None:

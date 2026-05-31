@@ -19,6 +19,7 @@ struct TodoListView: View {
     @State private var interactionsRealtimeTask: Task<Void, Never>?
 
     @Environment(AuthModel.self) private var auth
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -72,10 +73,23 @@ struct TodoListView: View {
                 SettingsView()
             }
             .task { await load() }
-            .onAppear { startRealtime() }
+            .onAppear {
+                print("[list] onAppear user=\(userID.uuidString)")
+                startRealtime()
+            }
             .onDisappear {
-                realtimeTask?.cancel()
-                interactionsRealtimeTask?.cancel()
+                print("[list] onDisappear user=\(userID.uuidString)")
+                stopRealtime()
+            }
+            .onChange(of: scenePhase) { oldPhase, newPhase in
+                print("[list] scenePhase \(oldPhase)→\(newPhase)")
+                // Backgrounding can drop the websocket; on foreground we
+                // refetch once and force-rebuild the realtime subscriptions
+                // so we never sit on stale UI.
+                guard newPhase == .active else { return }
+                stopRealtime()
+                startRealtime()
+                Task { await load() }
             }
         }
     }
@@ -275,10 +289,14 @@ struct TodoListView: View {
 
     @MainActor
     private func load() async {
+        let prevCount = todos.count
+        let prevSig = todos.map { "\($0.id.uuidString.prefix(8)):\($0.status.rawValue)" }.joined(separator: ",")
         do {
             let latest = try await TodosAPI.list()
             todos = latest
-            print("[todos] list loaded count=\(todos.count)")
+            let newSig = todos.map { "\($0.id.uuidString.prefix(8)):\($0.status.rawValue)" }.joined(separator: ",")
+            let changed = prevSig != newSig
+            print("[todos] list loaded count=\(todos.count) (Δ=\(todos.count - prevCount)) changed=\(changed)")
             loadError = nil
             await loadOpenInteractions()
         } catch {
@@ -302,40 +320,99 @@ struct TodoListView: View {
     }
 
     private func startRealtime() {
-        guard realtimeTask == nil else { return }
-        print("[realtime][todos] starting for user=\(userID.uuidString)")
-        realtimeTask = Task {
-            do {
-                let channel = Supa.client.channel("public:todos:user=\(userID.uuidString)")
-                let inserts = channel.postgresChange(
-                    AnyAction.self,
-                    schema: "public",
-                    table: "todos"
-                )
-                await channel.subscribe()
-                print("[realtime][todos] subscribed")
-                for await change in inserts {
-                    print("[realtime][todos] change received: \(change)")
-                    await handle(change)
+        if realtimeTask == nil {
+            print("[realtime][todos] starting for user=\(userID.uuidString)")
+            realtimeTask = Task {
+                var attempt = 0
+                // Retry loop so that a websocket drop (background, network
+                // blip, server restart) doesn't permanently kill realtime —
+                // we keep trying to resubscribe until the surrounding view
+                // disappears and cancels this task.
+                while !Task.isCancelled {
+                    attempt += 1
+                    let channel = Supa.client.channel(
+                        "public:todos:user=\(userID.uuidString)"
+                    )
+                    let inserts = channel.postgresChange(
+                        AnyAction.self,
+                        schema: "public",
+                        table: "todos"
+                    )
+                    do {
+                        try await channel.subscribeWithError()
+                        print("[realtime][todos] subscribe ok status=\(channel.status) attempt=\(attempt)")
+                    } catch {
+                        print("[realtime][todos] subscribe FAILED status=\(channel.status) error=\(error) attempt=\(attempt)")
+                    }
+                    var eventCount = 0
+                    for await change in inserts {
+                        if Task.isCancelled { break }
+                        eventCount += 1
+                        print("[realtime][todos] event #\(eventCount): \(change)")
+                        await handle(change)
+                    }
+                    // `removeChannel` (not `unsubscribe`) is what evicts
+                    // the channel from the realtime client's internal
+                    // topic cache. Without this, the next iteration's
+                    // `Supa.client.channel(name)` returns the same
+                    // already-subscribed channel and `postgresChange`
+                    // throws "Cannot add callbacks after subscribe()".
+                    await Supa.client.removeChannel(channel)
+                    print("[realtime][todos] stream ended events=\(eventCount) cancelled=\(Task.isCancelled)")
+                    if Task.isCancelled { break }
+                    try? await Task.sleep(for: .seconds(1))
                 }
-                print("[realtime][todos] stream ended")
+                print("[realtime][todos] task exit")
             }
         }
-        guard interactionsRealtimeTask == nil else { return }
-        interactionsRealtimeTask = Task {
-            let channel = Supa.client.channel(
-                "public:todo_interactions:user=\(userID.uuidString)"
-            )
-            let stream = channel.postgresChange(
-                AnyAction.self,
-                schema: "public",
-                table: "todo_interactions"
-            )
-            await channel.subscribe()
-            for await _ in stream {
-                await loadOpenInteractions()
+
+        if interactionsRealtimeTask == nil {
+            print("[realtime][todo_interactions] starting for user=\(userID.uuidString)")
+            interactionsRealtimeTask = Task {
+                var attempt = 0
+                while !Task.isCancelled {
+                    attempt += 1
+                    let channel = Supa.client.channel(
+                        "public:todo_interactions:user=\(userID.uuidString)"
+                    )
+                    let stream = channel.postgresChange(
+                        AnyAction.self,
+                        schema: "public",
+                        table: "todo_interactions"
+                    )
+                    do {
+                        try await channel.subscribeWithError()
+                        print("[realtime][todo_interactions] subscribe ok status=\(channel.status) attempt=\(attempt)")
+                    } catch {
+                        print("[realtime][todo_interactions] subscribe FAILED status=\(channel.status) error=\(error) attempt=\(attempt)")
+                    }
+                    var eventCount = 0
+                    for await change in stream {
+                        if Task.isCancelled { break }
+                        eventCount += 1
+                        print("[realtime][todo_interactions] event #\(eventCount): \(change)")
+                        await loadOpenInteractions()
+                    }
+                    await Supa.client.removeChannel(channel)
+                    print("[realtime][todo_interactions] stream ended events=\(eventCount) cancelled=\(Task.isCancelled)")
+                    if Task.isCancelled { break }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+                print("[realtime][todo_interactions] task exit")
             }
         }
+    }
+
+    /// Cancel the realtime tasks and clear their handles so the next
+    /// `startRealtime()` call (e.g. on `.onAppear` after returning from
+    /// a pushed detail view) actually re-subscribes. Without nil-ing out
+    /// the State the `guard … == nil` short-circuits and live updates
+    /// stay dead until the view is re-created from scratch.
+    private func stopRealtime() {
+        realtimeTask?.cancel()
+        realtimeTask = nil
+        interactionsRealtimeTask?.cancel()
+        interactionsRealtimeTask = nil
     }
 
     @MainActor
