@@ -54,6 +54,7 @@ CONNECTION_SLUGS: frozenset[str] = frozenset(
         "github",
         "reddit",
         "hunter",
+        "linkedin",
     }
 )
 

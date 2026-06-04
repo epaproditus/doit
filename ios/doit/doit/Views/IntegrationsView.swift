@@ -9,6 +9,7 @@ struct IntegrationsView: View {
     @State private var oauthSession: ASWebAuthenticationSession?
     @State private var apiKeyToolkit: Toolkit?
     @State private var apiKeyInput = ""
+    @State private var apiKeySheetError: String?
 
     init() {
         let cachedToolkits = IntegrationsAPI.cachedToolkits ?? []
@@ -61,11 +62,16 @@ struct IntegrationsView: View {
             ApiKeyConnectSheet(
                 toolkit: tk,
                 apiKey: $apiKeyInput,
+                error: $apiKeySheetError,
+                footer: apiKeyFooter(for: tk),
                 busy: busySlug == tk.slug,
-                onConnect: { Task { await connectWithApiKey(tk) } },
+                onConnect: { key in
+                    Task { await connectWithApiKey(tk, apiKey: key) }
+                },
                 onCancel: {
                     apiKeyToolkit = nil
                     apiKeyInput = ""
+                    apiKeySheetError = nil
                 }
             )
         }
@@ -74,6 +80,7 @@ struct IntegrationsView: View {
     private func beginConnect(_ tk: Toolkit) {
         if tk.usesApiKey {
             apiKeyInput = ""
+            apiKeySheetError = nil
             apiKeyToolkit = tk
         } else {
             Task { await connectOAuth(tk) }
@@ -110,18 +117,39 @@ struct IntegrationsView: View {
         }
     }
 
-    private func connectWithApiKey(_ tk: Toolkit) async {
-        let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
+    private func connectWithApiKey(_ tk: Toolkit, apiKey key: String) async {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            apiKeySheetError = "Enter your \(tk.name) API key."
+            return
+        }
         busySlug = tk.slug
+        apiKeySheetError = nil
         defer { busySlug = nil }
         do {
-            _ = try await IntegrationsAPI.connect(toolkit: tk.slug, apiKey: key)
-            apiKeyToolkit = nil
-            apiKeyInput = ""
-            await load()
+            _ = try await IntegrationsAPI.connect(toolkit: tk.slug, apiKey: trimmed)
+            let toolkits = try await IntegrationsAPI.list()
+            if let updated = toolkits.first(where: { $0.slug == tk.slug }), updated.connected {
+                self.toolkits = toolkits
+                apiKeyToolkit = nil
+                apiKeyInput = ""
+                apiKeySheetError = nil
+                error = nil
+            } else {
+                apiKeySheetError =
+                    "Saved your key but couldn't confirm the connection. Pull down to refresh."
+            }
         } catch {
-            self.error = "Couldn't connect Hunter: \(error.localizedDescription)"
+            apiKeySheetError = IntegrationsAPI.userFacingError(error)
+        }
+    }
+
+    private func apiKeyFooter(for toolkit: Toolkit) -> String {
+        switch toolkit.slug {
+        case "hunter":
+            return "Find your key at hunter.io → API. Composio stores it securely for agent use."
+        default:
+            return "Composio stores your key securely for agent use."
         }
     }
 
@@ -155,20 +183,30 @@ struct IntegrationsView: View {
 private struct ApiKeyConnectSheet: View {
     let toolkit: Toolkit
     @Binding var apiKey: String
+    @Binding var error: String?
+    let footer: String
     let busy: Bool
-    let onConnect: () -> Void
+    let onConnect: (String) -> Void
     let onCancel: () -> Void
 
     var body: some View {
         NavigationStack {
             Form {
+                if let error {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .font(.footnote)
+                    }
+                }
                 Section {
-                    SecureField("Hunter API key", text: $apiKey)
+                    SecureField("\(toolkit.name) API key", text: $apiKey)
                         .textContentType(.password)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                        .disabled(busy)
                 } footer: {
-                    Text("Find your key at hunter.io → API. Composio stores it securely for agent use.")
+                    Text(footer)
                 }
             }
             .navigationTitle("Connect \(toolkit.name)")
@@ -181,8 +219,10 @@ private struct ApiKeyConnectSheet: View {
                     if busy {
                         ProgressView()
                     } else {
-                        Button("Connect", action: onConnect)
-                            .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Connect") {
+                            onConnect(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
+                        }
+                        .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
             }

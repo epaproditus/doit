@@ -21,7 +21,7 @@ struct HermesLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     IslandLogo()
-                        .frame(width: 26, height: 26)
+                        .frame(width: 28, height: 28)
                         .padding(.top, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -61,26 +61,13 @@ struct HermesLiveActivity: Widget {
                 }
             } compactLeading: {
                 IslandLogo()
-                    .frame(width: 21, height: 21)
+                    .frame(width: 24, height: 24)
             } compactTrailing: {
-                Text(compactTrailing(for: context))
-                    .font(.caption2.weight(.semibold))
-                    .lineLimit(1)
-                    .frame(maxWidth: 76, alignment: .trailing)
-                    .monospacedDigit()
+                IslandElapsedText(state: context.state)
             } minimal: {
                 IslandLogo()
-                    .frame(width: 21, height: 21)
+                    .frame(width: 24, height: 24)
             }
-        }
-    }
-
-    private func compactTrailing(for context: ActivityViewContext<HermesActivityAttributes>) -> String {
-        switch context.state.state {
-        case "completed": return "Done"
-        case "failed": return "Failed"
-        case "paused": return "Paused"
-        default: return context.state.currentIntent
         }
     }
 }

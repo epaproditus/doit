@@ -13,6 +13,7 @@ enum TodoListDestination: Hashable {
 struct TodoListView: View {
     let userID: UUID
 
+    @Environment(AuthModel.self) private var auth
     @Environment(TodoStore.self) private var store
     @Environment(PushManager.self) private var push
     @Environment(\.scenePhase) private var scenePhase
@@ -81,7 +82,7 @@ struct TodoListView: View {
                     selectedSectionID = TodoListSection.todo.index
                 }
             }
-            .sheet(isPresented: $showSettings) {
+            .fullScreenCover(isPresented: $showSettings) {
                 SettingsView()
             }
             .onChange(of: navigationPath.count) { _, count in
@@ -157,17 +158,14 @@ struct TodoListView: View {
                     playLightHaptic()
                     showSettings = true
                 } label: {
-                    Image("doit_pofile")
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 30, height: 30)
-                        .clipShape(Circle())
-                        .background {
-                            Circle().fill(Color.black)
-                        }
-                        .overlay {
-                            Circle().stroke(Color(white: 0.85), lineWidth: 1)
-                        }
+                    ProfileAvatar(
+                        kind: .user(
+                            initials: auth.initials,
+                            imageData: auth.avatarImageData,
+                            url: auth.avatarURL
+                        ),
+                        size: 30
+                    )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Profile")
@@ -620,19 +618,13 @@ private struct TodoCard: View {
         VStack(alignment: .leading, spacing: TodoCardStyle.rowSpacing) {
             topRow
             Button(action: onOpen) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(displayTitle)
-                        .font(.system(size: 20, weight: .regular, design: .rounded))
-                        .foregroundStyle(Color.black)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.black.opacity(0.22))
-                }
-                .contentShape(Rectangle())
+                Text(displayTitle)
+                    .font(.system(size: 20, weight: .regular, design: .rounded))
+                    .foregroundStyle(Color.black)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -662,7 +654,6 @@ private struct TodoCard: View {
                         .foregroundStyle(TodoCardStyle.muted)
                     Spacer(minLength: 8)
                     topRowTrailing
-                        .frame(width: 20, height: 20)
                 }
                 .contentShape(Rectangle())
             }
@@ -670,29 +661,22 @@ private struct TodoCard: View {
         }
     }
 
-    @ViewBuilder
     private var topRowTrailing: some View {
-        if todo.status.isActive {
-            ProgressView()
-                .controlSize(.small)
-                .tint(TodoCardStyle.muted)
-        } else if !connectionSlugs.isEmpty {
-            ConnectionLogosRow(slugs: connectionSlugs, iconSize: 18, spacing: 4)
-        } else {
-            Image(systemName: trailingSymbol)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(TodoCardStyle.muted)
-        }
-    }
+        HStack(spacing: 5) {
+            if !connectionSlugs.isEmpty {
+                ConnectionLogosRow(slugs: connectionSlugs, iconSize: 16, spacing: 2)
+            }
 
-    private var trailingSymbol: String {
-        switch todo.status {
-        case .done: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
-        case .cancelled: return "minus.circle"
-        case .needs_auth: return "key.fill"
-        case .needs_input: return "hand.raised.fill"
-        default: return "sparkles"
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.black.opacity(0.28))
+                .frame(width: 11, height: 11)
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, connectionSlugs.isEmpty ? 5 : 7)
+        .background(Capsule().fill(Color.black.opacity(0.025)))
+        .overlay {
+            Capsule().stroke(Color.black.opacity(0.08), lineWidth: 1)
         }
     }
 

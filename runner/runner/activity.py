@@ -459,6 +459,7 @@ _TOOL_CATEGORY_HINTS: tuple[tuple[str, str], ...] = (
     ("twitter", "twitter"),
     ("reddit", "reddit"),
     ("hunter", "hunter"),
+    ("linkedin", "linkedin"),
 )
 
 
@@ -515,6 +516,7 @@ _TOKEN_PRETTY_OVERRIDES: dict[str, str] = {
     "twitter": "Twitter",
     "reddit": "Reddit",
     "hunter": "Hunter",
+    "linkedin": "LinkedIn",
 }
 
 

@@ -10,6 +10,7 @@ user only ever sees their own connections.
 ```bash
 supabase functions deploy integrations
 supabase secrets set COMPOSIO_API_KEY=ak_xxx
+supabase secrets set COMPOSIO_MCP_SESSION_ID=trs_xxx   # from ~/.hermes/profiles/<profile>/config.yaml
 ```
 
 `SUPABASE_URL` and `SUPABASE_ANON_KEY` are injected by the platform.
@@ -51,3 +52,7 @@ append to `CATALOG`. The `slug` must match Composio's canonical toolkit slug.
   set, 400 for unknown toolkits or actions.
 - Connection ownership is re-checked on disconnect (the connection must belong
   to the caller's `user_id`) as a defense-in-depth check.
+- API-key toolkits (Hunter) also patch the Hermes Composio MCP session via
+  `COMPOSIO_MCP_SESSION_ID` so the agent sees the connection immediately.
+  Without this secret, Connections shows "Connected" but Hermes still prompts
+  for Hunter OAuth links.

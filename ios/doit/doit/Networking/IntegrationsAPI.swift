@@ -22,9 +22,35 @@ struct ConnectResult: Codable, Sendable {
     let connected: Bool?
 }
 
+private struct IntegrationsErrorBody: Codable {
+    let error: String?
+    let detail: String?
+}
+
 @MainActor
 enum IntegrationsAPI {
     private(set) static var cachedToolkits: [Toolkit]?
+
+    static func userFacingError(_ error: Error) -> String {
+        if let fnError = error as? FunctionsError,
+           case .httpError(_, let data) = fnError,
+           let body = try? JSONDecoder().decode(IntegrationsErrorBody.self, from: data) {
+            if body.error == "invalid_api_key" {
+                return body.detail
+                    ?? "Hunter rejected this API key. Copy it again from hunter.io → API."
+            }
+            if let detail = body.detail, !detail.isEmpty {
+                return detail
+            }
+        }
+
+        let description = error.localizedDescription
+        if description.contains("invalid_api_key")
+            || description.contains("Credentials validation failed") {
+            return "Hunter rejected this API key. Copy it again from hunter.io → API (no extra spaces)."
+        }
+        return description
+    }
 
     static func list() async throws -> [Toolkit] {
         struct Body: Codable { let action: String }

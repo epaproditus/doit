@@ -19,6 +19,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const COMPOSIO_API = "https://backend.composio.dev";
 const COMPOSIO_API_KEY = Deno.env.get("COMPOSIO_API_KEY") ?? "";
+/** Hermes profile MCP session id (trs_…). Required to sync API-key toolkits. */
+const COMPOSIO_MCP_SESSION_ID = Deno.env.get("COMPOSIO_MCP_SESSION_ID") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
@@ -90,6 +92,11 @@ const CATALOG: Array<{
         name: "Hunter",
         description: "Find and verify professional email addresses.",
         auth_type: "api_key",
+    },
+    {
+        slug: "linkedin",
+        name: "LinkedIn",
+        description: "Read your profile and post on your behalf.",
     },
 ];
 
@@ -167,21 +174,62 @@ async function listConnections(
     return Array.isArray(data) ? data : (data.items ?? data.data ?? []);
 }
 
+function apiKeyToolkitSlugs(): string[] {
+    return CATALOG.filter((t) => t.auth_type === "api_key").map((t) => t.slug);
+}
+
+async function buildSessionConnectionContext(
+    userId: string,
+    toolkits: string[],
+): Promise<{
+    auth_configs: Record<string, string>;
+    connected_accounts: Record<string, string[]>;
+}> {
+    const auth_configs: Record<string, string> = {};
+        for (const slug of apiKeyToolkitSlugs()) {
+        if (toolkits.includes(slug)) {
+            auth_configs[slug] = await getOrCreateAuthConfig(slug, "API_KEY");
+        }
+    }
+
+    const connected_accounts: Record<string, string[]> = {};
+    for (const c of await listConnections(userId)) {
+        if (c.status !== "ACTIVE") continue;
+        const slug = (c.toolkit?.slug ?? c.appName ?? "").toLowerCase();
+        if (!slug || !toolkits.includes(slug)) continue;
+        connected_accounts[slug] = [c.id];
+    }
+
+    return { auth_configs, connected_accounts };
+}
+
 async function createSession(
     userId: string,
     toolkits = connectableSlugs(),
 ): Promise<string> {
+    const { auth_configs, connected_accounts } = await buildSessionConnectionContext(
+        userId,
+        toolkits,
+    );
+    const payload: Record<string, unknown> = {
+        user_id: userId,
+        toolkits: { enable: toolkits },
+        manage_connections: {
+            enable: true,
+            enable_wait_for_connections: false,
+            enable_connection_removal: true,
+        },
+    };
+    if (Object.keys(auth_configs).length > 0) {
+        payload.auth_configs = auth_configs;
+    }
+    if (Object.keys(connected_accounts).length > 0) {
+        payload.connected_accounts = connected_accounts;
+    }
+
     const res = await composio("/api/v3.1/tool_router/session", {
         method: "POST",
-        body: JSON.stringify({
-            user_id: userId,
-            toolkits: { enable: toolkits },
-            manage_connections: {
-                enable: true,
-                enable_wait_for_connections: false,
-                enable_connection_removal: true,
-            },
-        }),
+        body: JSON.stringify(payload),
     });
     if (!res.ok) {
         const t = await res.text();
@@ -244,13 +292,18 @@ async function initiateConnection(
 
 interface ComposioAuthConfig {
     id: string;
+    auth_scheme?: string;
+    is_enabled_for_tool_router?: boolean;
 }
 
-async function getOrCreateAuthConfig(toolkitSlug: string): Promise<string> {
+async function getOrCreateAuthConfig(
+    toolkitSlug: string,
+    authScheme: "API_KEY" = "API_KEY",
+): Promise<string> {
     const listRes = await composio(
         `/api/v3/auth_configs?toolkit_slug=${
             encodeURIComponent(toolkitSlug)
-        }&limit=5`,
+        }&limit=10`,
     );
     if (!listRes.ok) {
         const t = await listRes.text();
@@ -260,8 +313,15 @@ async function getOrCreateAuthConfig(toolkitSlug: string): Promise<string> {
     const items: ComposioAuthConfig[] = Array.isArray(listData)
         ? listData
         : (listData.items ?? listData.data ?? []);
-    if (items.length > 0 && items[0].id) {
-        return items[0].id;
+    const apiKeyConfigs = items.filter((i) => i.auth_scheme === authScheme);
+    const routerReady = apiKeyConfigs.find((i) =>
+        i.is_enabled_for_tool_router === true
+    );
+    if (routerReady?.id) {
+        return routerReady.id;
+    }
+    if (apiKeyConfigs.length > 0 && apiKeyConfigs[0].id) {
+        return apiKeyConfigs[0].id;
     }
 
     const createRes = await composio("/api/v3/auth_configs", {
@@ -294,28 +354,28 @@ async function connectApiKey(
     apiKey: string,
 ): Promise<{ connection_id: string }> {
     const authConfigId = await getOrCreateAuthConfig(toolkit);
-    const conns = await listConnections(userId);
-    for (const c of conns) {
-        const slug = (c.toolkit?.slug ?? c.appName ?? "").toLowerCase();
-        if (slug === toolkit) {
-            await deleteConnection(c.id);
-        }
-    }
-    const res = await composio("/api/v3/connected_accounts", {
+    const res = await composio("/api/v3.1/connected_accounts", {
         method: "POST",
         body: JSON.stringify({
             auth_config: { id: authConfigId },
-            user_id: userId,
             connection: {
+                user_id: userId,
                 state: {
                     authScheme: "API_KEY",
                     val: { generic_api_key: apiKey },
                 },
             },
+            validate_credentials: true,
         }),
     });
     if (!res.ok) {
         const t = await res.text();
+        if (
+            res.status === 400 &&
+            t.includes("Credentials validation failed")
+        ) {
+            throw new Error("invalid_api_key");
+        }
         throw new Error(`composio api_key connect failed: ${res.status} ${t}`);
     }
     const data = await res.json();
@@ -325,7 +385,49 @@ async function connectApiKey(
             `composio api_key connect: missing id in ${JSON.stringify(data)}`,
         );
     }
+
+    const conns = await listConnections(userId);
+    for (const c of conns) {
+        const slug = (c.toolkit?.slug ?? c.appName ?? "").toLowerCase();
+        if (slug === toolkit && c.id !== connectionId) {
+            await deleteConnection(c.id);
+        }
+    }
+    await syncMcpSessionToolkit(toolkit, connectionId, authConfigId);
     return { connection_id: connectionId };
+}
+
+async function syncMcpSessionToolkit(
+    toolkit: string,
+    connectionId: string | null,
+    authConfigId?: string,
+): Promise<void> {
+    if (!COMPOSIO_MCP_SESSION_ID) {
+        console.warn(
+            "COMPOSIO_MCP_SESSION_ID unset; Hermes MCP session not synced for",
+            toolkit,
+        );
+        return;
+    }
+    const patch: Record<string, unknown> = {};
+    if (authConfigId) {
+        patch.auth_configs = { [toolkit]: authConfigId };
+    }
+    if (connectionId) {
+        patch.connected_accounts = { [toolkit]: [connectionId] };
+    } else {
+        patch.connected_accounts = { [toolkit]: [] };
+    }
+    const res = await composio(
+        `/api/v3.1/tool_router/session/${
+            encodeURIComponent(COMPOSIO_MCP_SESSION_ID)
+        }`,
+        { method: "PATCH", body: JSON.stringify(patch) },
+    );
+    if (!res.ok) {
+        const t = await res.text();
+        console.error("mcp session sync failed:", res.status, t);
+    }
 }
 
 async function deleteConnection(connectionId: string): Promise<void> {
@@ -461,6 +563,17 @@ serve(async (req) => {
                     return json({ error: "not_found" }, 404);
                 }
                 await deleteConnection(body.connection_id);
+                const catalogEntry = CATALOG.find((t) =>
+                    t.auth_type === "api_key" &&
+                    conns.some((c) =>
+                        c.id === body.connection_id &&
+                        (c.toolkit?.slug ?? c.appName ?? "").toLowerCase() ===
+                            t.slug
+                    )
+                );
+                if (catalogEntry) {
+                    await syncMcpSessionToolkit(catalogEntry.slug, null);
+                }
                 return json({ ok: true });
             }
             default:
@@ -468,6 +581,18 @@ serve(async (req) => {
         }
     } catch (e) {
         console.error("integrations error:", e);
-        return json({ error: "internal", detail: String(e) }, 500);
+        const msg = String(e);
+        if (msg.includes("invalid_api_key")) {
+            const catalogEntry = body.toolkit
+                ? CATALOG.find((t) => t.slug === body.toolkit)
+                : undefined;
+            const name = catalogEntry?.name ?? "This service";
+            return json({
+                error: "invalid_api_key",
+                detail:
+                    `${name} rejected this API key. Copy it again from the provider dashboard (no extra spaces).`,
+            }, 400);
+        }
+        return json({ error: "internal", detail: msg }, 500);
     }
 });
