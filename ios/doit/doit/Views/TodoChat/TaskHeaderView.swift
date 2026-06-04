@@ -648,27 +648,64 @@ private struct LinkArtifactCard: View {
     var body: some View {
         let title = artifact.title ?? artifact.url?.host ?? "Open link"
         let url = artifact.url
-        let tap: (() -> Void)? = url.map { target in
-            { openURL(target) }
-        }
-        ArtifactCardShell(
-            icon: AnyView(providerIcon),
-            title: title,
-            trailing: AnyView(
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            ),
-            onTap: tap
-        ) {
-            if let host = url?.host {
-                Text(host)
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        cardBody(title: title, url: url)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let url {
+                    openURL(url)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityHint(url == nil ? "" : "Open link")
+    }
+
+    @ViewBuilder
+    private func cardBody(title: String, url: URL?) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            providerIcon
+                .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let host = url?.host {
+                    Text(host)
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 8)
+            if let url {
+                Button {
+                    openURL(url)
+                } label: {
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                        .padding(.top, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open link")
             }
         }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.05), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.06), radius: 10, x: 0, y: 4)
     }
 
     @ViewBuilder

@@ -56,6 +56,54 @@ struct TodoChatThread: View {
     /// means there's nothing pending and the composer uses its
     /// default placeholder.
     let composerReplyHint: String?
+    /// Artifact references the composer's `@` picker filters over.
+    /// Empty by default so non-todo callers (cron jobs) don't have
+    /// to plumb anything through.
+    let availableReferences: [ArtifactReference]
+    /// Outside-driven insertion ping: the parent sets this when the
+    /// user taps an artifact card in the header so the composer
+    /// embeds the matching pill at the cursor.
+    @Binding var pendingArtifactInsertion: ArtifactInsertionRequest?
+
+    init(
+        items: [ConversationItem],
+        attachmentsByID: [UUID: TodoAttachment],
+        attachmentURLs: [UUID: URL],
+        submittingOptionID: String?,
+        isAgentRunning: Bool,
+        photoSelections: Binding<[PhotosPickerItem]>,
+        canAddMoreAttachments: Bool,
+        maxNewAttachments: Int,
+        onTakePhoto: @escaping () -> Void,
+        onPreviewAttachment: @escaping (TodoAttachment) -> Void,
+        onOpenOAuth: @escaping (URL) -> Void,
+        onRespondInteraction: @escaping (_ interaction: ChatInteractionEnvelope, _ optionID: String?, _ text: String?) -> Void,
+        onSend: @escaping (String) -> Void,
+        onFocusChange: @escaping (Bool) -> Void,
+        onConfirmRun: @escaping () -> Void,
+        composerReplyHint: String?,
+        availableReferences: [ArtifactReference] = [],
+        pendingArtifactInsertion: Binding<ArtifactInsertionRequest?> = .constant(nil)
+    ) {
+        self.items = items
+        self.attachmentsByID = attachmentsByID
+        self.attachmentURLs = attachmentURLs
+        self.submittingOptionID = submittingOptionID
+        self.isAgentRunning = isAgentRunning
+        self._photoSelections = photoSelections
+        self.canAddMoreAttachments = canAddMoreAttachments
+        self.maxNewAttachments = maxNewAttachments
+        self.onTakePhoto = onTakePhoto
+        self.onPreviewAttachment = onPreviewAttachment
+        self.onOpenOAuth = onOpenOAuth
+        self.onRespondInteraction = onRespondInteraction
+        self.onSend = onSend
+        self.onFocusChange = onFocusChange
+        self.onConfirmRun = onConfirmRun
+        self.composerReplyHint = composerReplyHint
+        self.availableReferences = availableReferences
+        self._pendingArtifactInsertion = pendingArtifactInsertion
+    }
 
     /// Current keyboard overlap (in points) over the chat panel. Driven
     /// by `keyboardWillChangeFrameNotification`; we apply it as bottom
@@ -73,6 +121,8 @@ struct TodoChatThread: View {
                 maxNewAttachments: maxNewAttachments,
                 isAgentRunning: isAgentRunning,
                 replyHint: composerReplyHint,
+                availableReferences: availableReferences,
+                pendingInsertion: $pendingArtifactInsertion,
                 onTakePhoto: onTakePhoto,
                 onSend: onSend,
                 onFocusChange: onFocusChange
@@ -603,11 +653,12 @@ private struct AgentErrorMessage: View {
 
 // MARK: - Composer
 
-/// Live chat composer. Text + send fire `onSend` with the trimmed draft;
-/// the field and send button auto-disable while the agent is mid-turn so
-/// the user can't pile messages on top of an in-flight Hermes run. The
-/// paperclip menu remains available for attachments regardless of agent
-/// state — uploads always work because they don't bother the agent.
+/// Live chat composer. Text + send fire `onSend` with the trimmed,
+/// markdown-serialized draft; the field and send button auto-disable
+/// while the agent is mid-turn so the user can't pile messages on top
+/// of an in-flight Hermes run. The paperclip menu remains available
+/// for attachments regardless of agent state — uploads always work
+/// because they don't bother the agent.
 ///
 /// `onFocusChange` is forwarded out so the parent (TodoDetailView) can
 /// snap the vertical split to `.bottomFull` while the field is focused
@@ -622,20 +673,26 @@ private struct ChatComposer: View {
     /// When present we surface it as the placeholder so the user knows
     /// the composer is the way to answer the agent's pending question.
     let replyHint: String?
+    /// Top-section artifacts the user can mention with `@` or by
+    /// tapping the cards above. Empty list disables the picker
+    /// without removing the composer.
+    let availableReferences: [ArtifactReference]
+    /// Outside-driven insertion request (artifact card taps in the
+    /// header). Internal `@` selections also flow through this same
+    /// binding so the underlying `MentionTextView` only has one way
+    /// to add a pill.
+    @Binding var pendingInsertion: ArtifactInsertionRequest?
     let onTakePhoto: () -> Void
     let onSend: (String) -> Void
     let onFocusChange: (Bool) -> Void
 
-    @State private var draft: String = ""
+    @State private var draft: MentionDraft = .empty
     @State private var showPhotosPicker = false
-    @FocusState private var focused: Bool
-
-    private var trimmedDraft: String {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    @State private var isFocused: Bool = false
+    @State private var mentionQuery: String?
 
     private var canSend: Bool {
-        !isAgentRunning && !trimmedDraft.isEmpty
+        !isAgentRunning && draft.hasContent
     }
 
     private var placeholder: String {
@@ -644,56 +701,81 @@ private struct ChatComposer: View {
         return "Message Doit"
     }
 
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            attachMenu
-                .disabled(!canAddMoreAttachments)
-                .opacity(canAddMoreAttachments ? 1 : 0.4)
+    private var pickerActive: Bool {
+        guard let query = mentionQuery, !availableReferences.isEmpty else {
+            return false
+        }
+        let q = query
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return true }
+        return availableReferences.contains {
+            $0.displayTitle.lowercased().contains(q)
+        }
+    }
 
-            TextField(placeholder, text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .font(.system(size: 16, weight: .regular, design: .rounded))
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
+    var body: some View {
+        VStack(spacing: 8) {
+            if pickerActive, let query = mentionQuery {
+                MentionPickerOverlay(
+                    query: query,
+                    candidates: availableReferences,
+                    onSelect: insertReference
+                )
+                .padding(.horizontal, 12)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
+            HStack(alignment: .bottom, spacing: 10) {
+                attachMenu
+                    .disabled(!canAddMoreAttachments)
+                    .opacity(canAddMoreAttachments ? 1 : 0.4)
+
+                MentionTextView(
+                    draft: $draft,
+                    pendingInsertion: $pendingInsertion,
+                    isFocused: $isFocused,
+                    mentionQuery: $mentionQuery,
+                    placeholder: placeholder,
+                    isEnabled: !isAgentRunning,
+                    onSubmit: submit
+                )
                 .background(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
                 )
-                .focused($focused)
-                .disabled(isAgentRunning)
-                .submitLabel(.send)
-                .onSubmit(submit)
-                // Multiline TextFields ignore `.onSubmit` on iOS — Return
-                // always inserts `\n`. Intercept a trailing newline (the
-                // keyboard's blue send arrow) and route it to `submit`
-                // instead so Return behaves like every other chat app.
-                .onChange(of: draft) { _, newValue in
-                    guard newValue.hasSuffix("\n") else { return }
-                    draft = String(newValue.dropLast())
-                    submit()
-                }
 
-            Button(action: submit) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        (canSend ? Color.accentColor : Color.primary.opacity(0.4)),
-                        in: Circle()
-                    )
+                Button(action: submit) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            (canSend ? Color.accentColor : Color.primary.opacity(0.4)),
+                            in: Circle()
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .accessibilityLabel("Send")
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 12)
         .animation(.smooth(duration: 0.2), value: canSend)
         .animation(.smooth(duration: 0.2), value: isAgentRunning)
-        .onChange(of: focused) { _, isFocused in
-            onFocusChange(isFocused)
+        .animation(.smooth(duration: 0.2), value: pickerActive)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange(focused)
+        }
+        .onChange(of: pendingInsertion) { _, request in
+            // When the parent stages an insertion, automatically
+            // focus the field so the keyboard pops and the cursor
+            // sits next to the freshly-inserted pill.
+            if request != nil, !isFocused {
+                isFocused = true
+            }
         }
         .photosPicker(
             isPresented: $showPhotosPicker,
@@ -704,12 +786,19 @@ private struct ChatComposer: View {
         )
     }
 
+    private func insertReference(_ ref: ArtifactReference) {
+        draft = draft.replacingActiveMentionQuery(mentionQuery, with: ref)
+        mentionQuery = nil
+        isFocused = true
+    }
+
     private func submit() {
-        let text = trimmedDraft
+        let text = draft.serialized
         guard !text.isEmpty, !isAgentRunning else { return }
         onSend(text)
-        draft = ""
-        focused = false
+        draft = .empty
+        mentionQuery = nil
+        isFocused = false
     }
 
     private var attachMenu: some View {

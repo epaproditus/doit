@@ -42,6 +42,13 @@ struct TodoDetailView: View {
     /// and roll back to whatever they had before once they dismiss.
     @State private var detentBeforeFocus: SplitDetent?
 
+    /// Pending artifact-reference insertion routed from the `@` picker
+    /// down to the `MentionTextView`. Each selection generates a new
+    /// `ArtifactInsertionRequest` with a unique id so the composer's
+    /// coordinator can dedupe re-renders against already-consumed
+    /// requests.
+    @State private var pendingArtifactInsertion: ArtifactInsertionRequest?
+
     init(todoID: UUID) {
         self.todoID = todoID
     }
@@ -61,6 +68,16 @@ struct TodoDetailView: View {
     /// Latest artifacts (header cards).
     private var artifacts: [TodoArtifact] {
         store.artifacts(for: todoID)
+    }
+
+    /// Composer-shaped artifact list. We deduplicate via the same
+    /// `groupedForDisplay` rule the header uses so the @ picker shows
+    /// the same set the user can see on screen, and we drop kinds the
+    /// composer can't represent (audio playback, malformed payloads).
+    private var artifactReferences: [ArtifactReference] {
+        let grouped = TodoArtifact.groupedForDisplay(artifacts)
+        let ordered = grouped.primary + grouped.emailDrafts
+        return ordered.compactMap(ArtifactReference.init(artifact:))
     }
 
     var body: some View {
@@ -120,7 +137,9 @@ struct TodoDetailView: View {
                     },
                     onFocusChange: handleComposerFocusChange,
                     onConfirmRun: confirmRun,
-                    composerReplyHint: openInteractionReplyHint
+                    composerReplyHint: openInteractionReplyHint,
+                    availableReferences: artifactReferences,
+                    pendingArtifactInsertion: $pendingArtifactInsertion
                 )
             }
         )
