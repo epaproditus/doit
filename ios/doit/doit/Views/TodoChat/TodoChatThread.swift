@@ -909,7 +909,7 @@ private struct ChatComposer: View {
     }
 
     private var placeholder: String {
-        if isAgentRunning { return "Hermes is working…" }
+        if isAgentRunning { return "doit is working…" }
         if isTranscribing { return "Transcribing…" }
         if let hint = replyHint, !hint.isEmpty { return hint }
         return "Message Doit"

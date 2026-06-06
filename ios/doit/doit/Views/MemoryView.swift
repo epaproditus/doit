@@ -263,7 +263,7 @@ private struct MemoryEditorView: View {
             if let existing, existing.effectiveSource == .hermes {
                 Section {
                     Label(
-                        "Hermes wrote this one. Edits will overwrite it and re-pin the entry.",
+                        "doit wrote this one. Edits will overwrite it and re-pin the entry.",
                         systemImage: "info.circle"
                     )
                     .font(.footnote)

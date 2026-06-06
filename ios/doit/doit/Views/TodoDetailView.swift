@@ -281,7 +281,7 @@ struct TodoDetailView: View {
            !hint.isEmpty {
             return hint
         }
-        return "Reply to Hermes"
+        return "Reply to doit"
     }
 
     /// Compact token count rendered in the drag pill. Hides while the todo

@@ -827,19 +827,34 @@ private struct UserProfileView: View {
             }
 
             Spacer()
+
+            Button {
+                Task { await save() }
+            } label: {
+                HStack {
+                    if saving {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(saving ? "Saving..." : "Save Profile")
+                }
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(saving)
+            .opacity(saving ? 0.72 : 1)
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.white)
         .navigationTitle("You")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button(saving ? "Saving" : "Save") {
-                    Task { await save() }
-                }
-                .disabled(saving)
-            }
-        }
         .onAppear {
             if displayName.isEmpty {
                 displayName = auth.displayName
@@ -880,8 +895,10 @@ private struct UserProfileView: View {
                 return
             }
             avatarImageData = jpegData
+            photoSelection = nil
             error = nil
         } catch {
+            photoSelection = nil
             self.error = "Couldn't load that photo."
         }
     }
