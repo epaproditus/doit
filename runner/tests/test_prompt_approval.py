@@ -30,6 +30,7 @@ class ApprovalPolicyPromptTests(unittest.TestCase):
         self.assertIn("calendar", lowered)
         self.assertIn("[[doit_interaction]]", lowered)
         self.assertIn("approval", lowered)
+        self.assertIn("do not call send", lowered)
 
     def test_creation_tasks_do_not_require_approval(self) -> None:
         prompt = build_prompt("Make me a spreadsheet of leads", "")

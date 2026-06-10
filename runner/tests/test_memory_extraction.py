@@ -11,6 +11,105 @@ from runner.memory_extraction import (
 )
 
 
+class MemoryModelOverrideTests(unittest.IsolatedAsyncioTestCase):
+    """DOIT_MEMORY_MODEL: fixed cheap model for the extraction pass."""
+
+    def test_unset_by_default(self) -> None:
+        import os
+        from unittest import mock
+
+        from runner.runner import _memory_model_override
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DOIT_MEMORY_MODEL", None)
+            self.assertIsNone(_memory_model_override())
+        with mock.patch.dict(
+            os.environ, {"DOIT_MEMORY_MODEL": "google/gemini-flash"}
+        ):
+            self.assertEqual(_memory_model_override(), "google/gemini-flash")
+        with mock.patch.dict(os.environ, {"DOIT_MEMORY_MODEL": "  "}):
+            self.assertIsNone(_memory_model_override())
+
+    async def test_direct_call_without_api_keys_falls_back(self) -> None:
+        import os
+        from unittest import mock
+
+        from runner.runner import _extract_memories_text_direct
+
+        with mock.patch.dict(
+            os.environ,
+            {"OPENROUTER_API_KEY": "", "OPENAI_API_KEY": ""},
+        ):
+            result = await _extract_memories_text_direct(
+                "prompt", model="google/gemini-flash"
+            )
+        # None → caller falls back to the Hermes-profile extraction run.
+        self.assertIsNone(result)
+
+
+class TrivialTodoSkipTests(unittest.TestCase):
+    """Trivial read-only tasks skip the post-task memory extraction run."""
+
+    def _todo(self, original: str, title: str | None = None, detail: str = "") -> dict:
+        return {
+            "id": "t1",
+            "user_id": "u1",
+            "original_title": original,
+            "title": title or original,
+            "detail": detail,
+        }
+
+    def test_list_query_is_trivial(self) -> None:
+        from runner.runner import _is_trivial_readonly_todo
+
+        self.assertTrue(
+            _is_trivial_readonly_todo(
+                self._todo("List the Github repos you have access to.")
+            )
+        )
+        self.assertTrue(
+            _is_trivial_readonly_todo(self._todo("What is on my calendar today?"))
+        )
+        self.assertTrue(
+            _is_trivial_readonly_todo(self._todo("How many unread emails do I have"))
+        )
+
+    def test_mutating_tasks_are_not_trivial(self) -> None:
+        from runner.runner import _is_trivial_readonly_todo
+
+        self.assertFalse(
+            _is_trivial_readonly_todo(self._todo("Send an email to John"))
+        )
+        self.assertFalse(
+            _is_trivial_readonly_todo(
+                self._todo("Check my inbox and draft replies to anything urgent")
+            )
+        )
+        self.assertFalse(
+            _is_trivial_readonly_todo(self._todo("Create a Google Doc for bugs"))
+        )
+
+    def test_long_research_tasks_are_not_trivial(self) -> None:
+        from runner.runner import _is_trivial_readonly_todo
+
+        self.assertFalse(
+            _is_trivial_readonly_todo(
+                self._todo(
+                    "Check international moving companies for a July move from "
+                    "San Francisco to London, compare at least four solid "
+                    "options including cost, timeline, insurance coverage, and "
+                    "reviews, and put everything in a spreadsheet I can share "
+                    "with my partner so we can decide together"
+                )
+            )
+        )
+
+    def test_empty_todo_is_not_trivial(self) -> None:
+        from runner.runner import _is_trivial_readonly_todo
+
+        self.assertFalse(_is_trivial_readonly_todo(self._todo("")))
+
+
 class MemoryExtractionTests(unittest.TestCase):
     def test_parse_extracts_high_confidence_preference(self) -> None:
         text = (

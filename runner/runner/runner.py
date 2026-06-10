@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -22,9 +23,15 @@ from .events import (
     TTSCall,
     TTSResult,
     Translated,
+    build_blocked_send_approval_payload,
     extract_terminal_text,
     extract_usage_total,
+    find_placeholder_matches,
+    is_outbound_send_tool,
     merge_terminal_translated,
+    outbound_send_approved_from_resume,
+    parse_artifacts,
+    parse_interaction,
     translate,
 )
 from .hermes import HermesClient
@@ -49,7 +56,10 @@ from .prepare import (
     PREP_INSTRUCTIONS,
     augment_cron_from_text,
     build_prepare_prompt,
+    demote_unrequested_cron,
     parse_prepare,
+    prep_fast_path,
+    prep_fast_path_enabled,
 )
 from .prompt import (
     build_followup_prompt as _build_followup_prompt,
@@ -58,6 +68,7 @@ from .prompt import (
     prep_session_id_for_todo as _prep_session_id_for_todo,
     session_id_for_todo as _session_id_for_todo,
     session_key_for_user as _session_key_for_user,
+    user_wants_spoken_audio,
 )
 from .push import Pusher, PushPayload
 from .spawn import apply_spawned_tasks
@@ -92,6 +103,50 @@ def _resolve_attachment_urls(db: DB, todo_id: str) -> list[str]:
     return urls
 
 
+def _parse_ts(value: str | None) -> datetime | None:
+    """Best-effort ISO timestamp parse for Supabase row timestamps."""
+    if not value:
+        return None
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _resolve_attachment_urls_split(
+    db: DB,
+    todo_id: str,
+) -> tuple[list[str], list[str]]:
+    """Signed attachment URLs split into (previously processed, new).
+
+    The boundary is the most recent terminal step (final/error) for the
+    todo: rows attached before it were visible to a completed run; rows
+    attached after it are new since the last run. On first runs (no
+    terminal step) everything lands in "new" and the prompt renders the
+    flat Attachments block, byte-identical to today.
+
+    Signed URLs are regenerated each run, so the split is the only way the
+    model can tell a re-signed old receipt from a freshly attached one.
+    """
+    cutoff = _parse_ts(db.get_last_terminal_step_ts(todo_id))
+    processed: list[str] = []
+    new: list[str] = []
+    for row in db.list_todo_attachments(todo_id):
+        path = row.get("storage_path")
+        if not path:
+            continue
+        url = db.sign_attachment_url(path)
+        if not url:
+            continue
+        created = _parse_ts(row.get("created_at"))
+        if cutoff is not None and created is not None and created <= cutoff:
+            processed.append(url)
+        else:
+            new.append(url)
+    return processed, new
+
+
 def _model_setting_label(setting: AgentModelSetting | None) -> str:
     if setting is None:
         return "profile-default"
@@ -115,8 +170,12 @@ async def run_one_todo(
 
     # Sign attachment URLs fresh every iteration so resumes that cross the
     # TTL still get URLs the agent can fetch. ``vision_analyze`` only ever
-    # sees these once they're embedded in the prompt below.
-    attachment_urls = _resolve_attachment_urls(db, todo_id)
+    # sees these once they're embedded in the prompt below. Split into
+    # previously-processed vs newly-attached so follow-up prompts can label
+    # them; on first runs everything is "new" and the block stays flat.
+    processed_attachment_urls, attachment_urls = _resolve_attachment_urls_split(
+        db, todo_id
+    )
 
     # If the user just answered an interaction the agent posted earlier, treat
     # this re-claim as a resume: short-circuit "cancel" responses, otherwise
@@ -136,9 +195,21 @@ async def run_one_todo(
     pending_bodies = [m.get("body") or "" for m in pending_messages]
     pending_ids = [str(m["id"]) for m in pending_messages]
 
+    # Did the USER ask for spoken audio anywhere in this task's text? This
+    # guards every audio persistence path in _consume_run: agent-generated
+    # audio for a task that never asked for it is discarded instead of
+    # surfacing as an unsolicited voice memo.
+    resume_freeform = ""
+    if resume is not None:
+        resume_freeform = str((resume.get("response") or {}).get("text") or "")
+    audio_requested = user_wants_spoken_audio(
+        original_title, title, detail, resume_freeform, *pending_bodies
+    )
+
     # Short-circuit a "cancel" response before any prompt work — nothing else
     # needs to happen and we don't want to spin up the Hermes endpoint just to
     # tear it down.
+    outbound_send_approved = outbound_send_approved_from_resume(resume)
     if resume is not None:
         response = resume.get("response") or {}
         option_id = str(response.get("option_id") or "").lower()
@@ -256,9 +327,17 @@ async def run_one_todo(
     #      replace older entries) rather than treating them as opaque text.
     memory_store = HermesMemoryStore(cfg.hermes_profiles_dir, endpoint.profile_name)
     staged_memories = sync_active_memories_to_hermes(db, memory_store, user_id)
+    # Image-only follow-up: the task already completed at least once
+    # (processed attachments exist) and the user attached something new
+    # without typing a message. Route it through the follow-up prompt so
+    # the model gets the "something new arrived" framing + task history
+    # instead of a bare first-run prompt.
+    image_only_followup = bool(
+        processed_attachment_urls and attachment_urls and not pending_bodies
+    )
     task_context = (
         _task_context_for_prompt(db, todo_id)
-        if resume is not None or pending_bodies
+        if resume is not None or pending_bodies or image_only_followup
         else None
     )
 
@@ -273,6 +352,8 @@ async def run_one_todo(
             attachment_urls=attachment_urls,
             pinned_memories=staged_memories,
             task_context=task_context,
+            topic=todo.get("topic"),
+            processed_attachment_urls=processed_attachment_urls,
         )
         if pending_bodies:
             quoted = "\n".join(
@@ -288,7 +369,7 @@ async def run_one_todo(
                     f"{quoted}"
                 )
             db.mark_user_messages_consumed(pending_ids)
-    elif pending_bodies:
+    elif pending_bodies or image_only_followup:
         prompt = _build_followup_prompt(
             title,
             detail,
@@ -299,6 +380,8 @@ async def run_one_todo(
             attachment_urls=attachment_urls,
             pinned_memories=staged_memories,
             task_context=task_context,
+            topic=todo.get("topic"),
+            processed_attachment_urls=processed_attachment_urls,
         )
         db.mark_user_messages_consumed(pending_ids)
     else:
@@ -310,6 +393,8 @@ async def run_one_todo(
             connection_slug=connection_slug,
             attachment_urls=attachment_urls,
             pinned_memories=staged_memories,
+            topic=todo.get("topic"),
+            processed_attachment_urls=processed_attachment_urls,
         )
 
     browse_skill = await maybe_prefetch_browse_skill(cfg, todo, endpoint.profile_name)
@@ -369,6 +454,8 @@ async def run_one_todo(
                 todo,
                 run_id,
                 profile_name=endpoint.profile_name,
+                audio_requested=audio_requested,
+                outbound_send_approved=outbound_send_approved,
             )
         )
 
@@ -532,6 +619,83 @@ async def run_one_todo(
     # cancelled produces no push (the user did it themselves).
 
 
+async def _convert_prep_todo_to_cron(
+    cfg: Config,
+    db: DB,
+    pusher: Pusher,
+    todo: dict,
+    *,
+    name: str,
+    prompt_text: str,
+    schedule: str,
+    schedule_display: str | None,
+    connection_slug: str | None,
+) -> bool:
+    """Convert a prep-classified recurring todo into a ``cron_jobs`` row.
+
+    Shared by the LLM prep path and the deterministic fast path. Pins the
+    job to the timezone the user was in when they typed the schedule so
+    "9 AM daily" stays anchored even if they travel. Returns ``True`` when
+    the job was inserted (placeholder todo deleted, configure pass kicked
+    off) and ``False`` when the insert failed and the caller should leave
+    the row as a normal task.
+    """
+    from datetime import UTC, datetime
+
+    todo_id = todo["id"]
+    user_id = todo["user_id"]
+    client_timezone = todo.get("client_timezone") or None
+    nxt = compute_next_run(schedule, timezone=client_timezone)
+    job_fields: dict[str, Any] = {
+        "user_id": user_id,
+        "name": name[:200],
+        "prompt": prompt_text[:4000],
+        "original_prompt": str(todo.get("title") or name)[:4000],
+        "schedule": schedule,
+        "schedule_display": schedule_display,
+        "connection_slug": connection_slug,
+        "state": "configuring",
+        "enabled": False,
+        "next_run_at": (nxt or datetime.now(UTC)).isoformat(),
+        "timezone": client_timezone,
+    }
+    inserted = db.insert_cron_job(job_fields)
+    if not inserted:
+        log.error(
+            "cron insert failed for todo %s — is migration "
+            "20240601000011_cron_jobs applied? Leaving as task.",
+            todo_id,
+        )
+        return False
+    log.info(
+        "prep converted todo %s to cron job %s schedule=%r",
+        todo_id,
+        inserted.get("id"),
+        schedule,
+    )
+    db.delete_todo(todo_id)
+    await configure_one_cron_job(cfg, db, pusher, inserted)
+    return True
+
+
+# Prep only stages Hermes memory when the user's words actually reference
+# remembered context; for everything else the sync is startup tax (prep
+# never recalls memories, only classifies).
+_PREP_MEMORY_HINT = re.compile(
+    r"\b(remember|memor(?:y|ies)|like\s+last\s+time|as\s+usual|my\s+usual|"
+    r"preferences?|you\s+know)\b",
+    re.IGNORECASE,
+)
+
+# Only sign attachment URLs during prep when the task text references the
+# image; otherwise the count alone is passed (execution signs the real URLs).
+_PREP_IMAGE_HINT = re.compile(
+    r"\b(image|images|photo|photos|picture|pictures|screenshot|screenshots|"
+    r"receipt|receipts|attach(?:ed|ment|ments)?)\b",
+    re.IGNORECASE,
+)
+
+
 async def prepare_one_todo(
     cfg: Config,
     db: DB,
@@ -604,6 +768,50 @@ async def prepare_one_todo(
                 )
                 return
 
+    combined_text = f"{raw_title}\n{detail}".strip()
+    attachment_rows = db.list_todo_attachments(todo_id)
+
+    # Deterministic fast path (1c, DOIT_PREP_FAST_PATH): skip the Hermes
+    # prep run for the narrow obvious cases — trivial bare reminders and
+    # unambiguous recurring directives. Anything with attachments or a
+    # prior clarification always goes through LLM prep.
+    if prep_fast_path_enabled() and prior is None and not attachment_rows:
+        decision = prep_fast_path(combined_text)
+        if decision is not None and decision.kind == "task":
+            log.info("prep fast-path: queuing bare reminder todo=%s", todo_id)
+            db.update_todo(todo_id, {"status": "requested"})
+            _write_activity(
+                db,
+                todo_id=todo_id,
+                user_id=user_id,
+                snapshot=AgentActivityService().initial(
+                    phase="starting",
+                    title="Starting task",
+                ),
+                hermes_run_id=None,
+            )
+            return
+        if decision is not None and decision.kind == "cron" and decision.schedule:
+            log.info(
+                "prep fast-path: converting todo=%s to cron schedule=%r",
+                todo_id,
+                decision.schedule,
+            )
+            converted = await _convert_prep_todo_to_cron(
+                cfg,
+                db,
+                pusher,
+                todo,
+                name=raw_title,
+                prompt_text=detail.strip() or raw_title,
+                schedule=decision.schedule,
+                schedule_display=decision.schedule_display,
+                connection_slug=None,
+            )
+            if converted:
+                return
+            # Insert failed — fall through to normal LLM prep.
+
     endpoint = db.get_user_hermes(user_id)
     if endpoint is None:
         # No Hermes for this user yet: skip prep and queue the row for
@@ -623,20 +831,39 @@ async def prepare_one_todo(
         endpoint.port,
     )
 
-    memory_store = HermesMemoryStore(cfg.hermes_profiles_dir, endpoint.profile_name)
-    with suppress(Exception):
-        sync_active_memories_to_hermes(db, memory_store, user_id)
+    # Memory sync is startup tax for most preps (prep classifies, it does
+    # not recall) — only stage it when the user's words reference memory.
+    if _PREP_MEMORY_HINT.search(combined_text):
+        memory_store = HermesMemoryStore(
+            cfg.hermes_profiles_dir, endpoint.profile_name
+        )
+        with suppress(Exception):
+            sync_active_memories_to_hermes(db, memory_store, user_id)
+
+    # Skip organization examples for very short inputs — there is not
+    # enough signal to match against, and the examples dominate the prompt.
+    organization_examples = (
+        db.get_todo_organization_examples(user_id, exclude_todo_id=todo_id)
+        if len(combined_text) >= 25
+        else []
+    )
+    # Sign attachment URLs only when the text references the image; prep
+    # should not analyze images, so the count alone is enough context for
+    # the title/slug. Execution always gets the real signed URLs.
+    prep_attachment_urls = (
+        _resolve_attachment_urls(db, todo_id)
+        if attachment_rows and _PREP_IMAGE_HINT.search(combined_text)
+        else None
+    )
 
     prep_prompt = build_prepare_prompt(
         title=raw_title,
         detail=detail,
         allowed_slugs=CONNECTION_SLUGS,
         prior=prior,
-        attachment_urls=_resolve_attachment_urls(db, todo_id),
-        organization_examples=db.get_todo_organization_examples(
-            user_id,
-            exclude_todo_id=todo_id,
-        ),
+        attachment_urls=prep_attachment_urls,
+        organization_examples=organization_examples,
+        attachment_count=len(attachment_rows),
     )
     # Per-todo prep session so any USER.md edits we just staged are visible
     # in the prep snapshot, and so prep turns from different todos do not
@@ -654,9 +881,13 @@ async def prepare_one_todo(
             session_key=session_key,
             instructions=PREP_INSTRUCTIONS,
         )
+        # Prep is best-effort metadata enrichment, not a gate on execution —
+        # it already falls back to status=requested on timeout, so keep the
+        # wait short instead of stalling the card for two minutes.
+        prep_timeout = float(os.getenv("DOIT_PREP_TIMEOUT_SECS", "25"))
         final_text = await asyncio.wait_for(
             _collect_final_text(hermes, run_id),
-            timeout=min(cfg.run_timeout_secs, 120.0),
+            timeout=min(cfg.run_timeout_secs, prep_timeout),
         )
     except (asyncio.TimeoutError, httpx.HTTPError, Exception) as e:
         log.warning("prep run failed for todo %s: %s", todo_id, e)
@@ -687,9 +918,11 @@ async def prepare_one_todo(
         db.update_todo(todo_id, {"status": "requested"})
         return
 
-    # Safety net: if the user asked for recurrence but the model returned
-    # kind=task (or cron without a schedule), infer from the raw input.
+    # Safety nets, both keyed on the same recurrence detector so they can
+    # never disagree: first demote model-hallucinated cron jobs the user
+    # never asked for, then promote missed recurrence from the raw input.
     combined_input = f"{raw_title}\n{detail}".strip()
+    result = demote_unrequested_cron(result, combined_input)
     result = augment_cron_from_text(result, combined_input)
     log.info(
         "prep result todo=%s kind=%s schedule=%r ready=%s",
@@ -763,48 +996,21 @@ async def prepare_one_todo(
 
     # Recurring automation — convert to a cron job and remove the placeholder todo.
     if result.is_cron and result.schedule:
-        from datetime import UTC, datetime
-
-        # Pin the new cron job to the timezone the user was in when they
-        # typed the schedule. This keeps "9 AM daily" anchored to that
-        # location for the lifetime of the job, even if the user later
-        # travels. ``None`` falls through to legacy UTC evaluation.
-        client_timezone = todo.get("client_timezone") or None
-        nxt = compute_next_run(result.schedule, timezone=client_timezone)
-        name = result.title or raw_title
         prompt_text = detail.strip() or raw_title
         if result.summary and result.summary not in prompt_text:
             prompt_text = f"{prompt_text}\n\n{result.summary}".strip()
-
-        job_fields: dict[str, Any] = {
-            "user_id": user_id,
-            "name": name[:200],
-            "prompt": prompt_text[:4000],
-            "original_prompt": raw_title[:4000],
-            "schedule": result.schedule,
-            "schedule_display": result.schedule_display,
-            "connection_slug": result.connection_slug,
-            "state": "configuring",
-            "enabled": False,
-            "next_run_at": (nxt or datetime.now(UTC)).isoformat(),
-            "timezone": client_timezone,
-        }
-        inserted = db.insert_cron_job(job_fields)
-        if inserted:
-            log.info(
-                "prep converted todo %s to cron job %s schedule=%r",
-                todo_id,
-                inserted.get("id"),
-                result.schedule,
-            )
-            db.delete_todo(todo_id)
-            await configure_one_cron_job(cfg, db, pusher, inserted)
-        else:
-            log.error(
-                "cron insert failed for todo %s — is migration "
-                "20240601000011_cron_jobs applied? Leaving as task.",
-                todo_id,
-            )
+        converted = await _convert_prep_todo_to_cron(
+            cfg,
+            db,
+            pusher,
+            todo,
+            name=result.title or raw_title,
+            prompt_text=prompt_text,
+            schedule=result.schedule,
+            schedule_display=result.schedule_display,
+            connection_slug=result.connection_slug,
+        )
+        if not converted:
             updates["status"] = "todo"
             db.update_todo(todo_id, updates)
         return
@@ -881,6 +1087,262 @@ def _write_activity(
     )
 
 
+def _placeholder_gate_enforced() -> bool:
+    """Whether placeholder detection blocks completion (vs log-only).
+
+    Off by default per the rollout plan: the gate first ships log-only
+    ("would have blocked") so we can review real-world hits before letting
+    it flip a `done` into `needs_input`.
+    """
+    return os.getenv("DOIT_PLACEHOLDER_GATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enforce",
+    }
+
+
+# Artifact kinds whose payloads carry outbound user-facing content (recipient
+# emails, invite bodies) where placeholder text means the model invented data
+# instead of using tools/memory or asking.
+_PLACEHOLDER_GATED_KINDS = {"email", "calendar"}
+
+_PLACEHOLDER_NEEDS_INPUT_PROMPT = (
+    "I need the real recipient/content — the draft still has placeholder "
+    "text. Can you fill in the missing details?"
+)
+
+
+def _structured_repair_enabled() -> bool:
+    """Whether the one-shot format-repair retry is on (DOIT_STRUCTURED_REPAIR).
+
+    Off by default: premium models almost never drop the structured blocks,
+    so the extra Hermes turn would be pure cost. The flag exists to catch
+    smaller-model dropouts (task finished, blocks missing).
+    """
+    return os.getenv("DOIT_STRUCTURED_REPAIR", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+# Tasks whose deliverable is inherently structured (an email artifact, a
+# calendar invite, an approval card). A quiet "done" with none of those means
+# the model did the work but dropped the contract blocks.
+_STRUCTURED_OUTPUT_HINT = re.compile(
+    r"\b(email|e-?mail|gmail|inbox|send|sent|reply|forward|draft|"
+    r"schedule|calendar|invite|meeting|event|appointment|book|rsvp)\b",
+    re.IGNORECASE,
+)
+
+
+def _expects_structured_output(todo: dict) -> bool:
+    text = " ".join(
+        str(todo.get(k) or "") for k in ("title", "detail", "topic")
+    )
+    return bool(_STRUCTURED_OUTPUT_HINT.search(text))
+
+
+_REPAIR_PROMPT = (
+    "Your previous reply finished the task but did not include the required "
+    "structured output blocks. Re-emit ONLY the missing [[DOIT_INTERACTION]] "
+    "or [[DOIT_ARTIFACT]] blocks describing the work you already completed. "
+    "Do not redo any tool work, do not call tools, and do not add any other "
+    "text."
+)
+
+
+async def _attempt_structured_repair(
+    db: DB,
+    pusher: Pusher,
+    hermes: HermesClient,
+    *,
+    todo_id: str,
+    user_id: str,
+    run_id: str,
+    activity: AgentActivityService,
+) -> str | None:
+    """One short follow-up turn to recover missing structured blocks.
+
+    Runs on the todo's own session so the model still has its transcript;
+    the prompt forbids tool work so the turn stays cheap. Returns the new
+    terminal status ("needs_input" when the repair surfaced an interaction),
+    "done" when artifacts were recovered, or None when nothing usable came
+    back (caller keeps the original quiet `done`). Capped at one attempt per
+    run by construction.
+    """
+    log.info("repair_attempted todo=%s run=%s", todo_id, run_id)
+    db.insert_step(
+        todo_id=todo_id,
+        user_id=user_id,
+        kind="status",
+        text="repair_attempted: re-requesting missing structured output",
+    )
+    repair_run_id: str | None = None
+    try:
+        repair_run_id = await hermes.start_run(
+            _REPAIR_PROMPT,
+            session_id=_session_id_for_todo(user_id, todo_id),
+            session_key=_session_key_for_user(user_id),
+        )
+        final_text = await asyncio.wait_for(
+            _collect_final_text(hermes, repair_run_id),
+            timeout=90.0,
+        )
+    except Exception as e:
+        log.warning("structured repair failed todo=%s: %s", todo_id, e)
+        return None
+    finally:
+        with suppress(Exception):
+            if repair_run_id is not None:
+                await hermes.stop_run(repair_run_id)
+    if not final_text:
+        return None
+
+    interaction = parse_interaction(final_text)
+    artifacts = parse_artifacts(final_text)
+    persisted = False
+    for artifact in artifacts:
+        # Audio/image artifacts need the full persistence pipeline (upload,
+        # signing) and were not requested here — recover only the simple
+        # structured kinds.
+        if artifact.kind in ("audio", "image"):
+            continue
+        db.upsert_artifact(
+            todo_id=todo_id,
+            user_id=user_id,
+            key=artifact.key,
+            kind=artifact.kind,
+            title=artifact.title,
+            payload=artifact.payload,
+            hermes_run_id=run_id,
+        )
+        persisted = True
+    if interaction is not None:
+        db.supersede_open_interactions(todo_id)
+        db.insert_interaction(
+            todo_id=todo_id,
+            user_id=user_id,
+            kind=interaction.kind,
+            prompt=interaction.prompt,
+            payload=interaction.payload,
+            hermes_run_id=run_id,
+        )
+        db.update_todo(todo_id, {"status": "needs_input"})
+        await pusher.send(
+            db.list_apns_tokens(user_id),
+            PushPayload(
+                title="Needs your input",
+                body=interaction.prompt[:160],
+                todo_id=todo_id,
+                kind="needs_input",
+            ),
+        )
+        _write_activity(
+            db,
+            todo_id=todo_id,
+            user_id=user_id,
+            snapshot=activity.mark_terminal(
+                state="paused",
+                phase="needs_input",
+                title="Needs your input",
+                detail=interaction.prompt,
+            ),
+            hermes_run_id=run_id,
+        )
+        return "needs_input"
+    if persisted:
+        log.info(
+            "repair recovered %d artifact(s) todo=%s run=%s",
+            len(artifacts), todo_id, run_id,
+        )
+        return "done"
+    return None
+
+
+_OUTBOUND_SEND_BLOCKED_PROMPT = (
+    "Review this draft before I send it — tap Send when you're ready, "
+    "or Edit to change it."
+)
+
+
+async def _halt_for_unauthorized_outbound_send(
+    db: DB,
+    pusher: Pusher,
+    hermes: HermesClient,
+    activity: AgentActivityService,
+    *,
+    todo_id: str,
+    user_id: str,
+    run_id: str,
+    tool_name: str | None,
+    draft_hint: str | None,
+    live_total: int,
+    stop_run: bool,
+) -> str:
+    """Stop a run that tried to send/post without user approval on the card."""
+    log.warning(
+        "outbound_send_guard: blocked unauthorized send todo=%s run=%s tool=%s",
+        todo_id,
+        run_id,
+        tool_name,
+    )
+    if stop_run:
+        with suppress(Exception):
+            await hermes.stop_run(run_id)
+    db.insert_step(
+        todo_id=todo_id,
+        user_id=user_id,
+        kind="status",
+        text=(
+            "Blocked an outbound send until you approve the draft on the "
+            "review card."
+        ),
+    )
+    prior_content = None
+    if draft_hint and draft_hint.strip():
+        prior_content = draft_hint.strip()[:4000]
+    db.supersede_open_interactions(todo_id)
+    db.insert_interaction(
+        todo_id=todo_id,
+        user_id=user_id,
+        kind="approval",
+        prompt=_OUTBOUND_SEND_BLOCKED_PROMPT,
+        payload=build_blocked_send_approval_payload(
+            draft_hint=draft_hint,
+            prior_content=prior_content,
+        ),
+        hermes_run_id=run_id,
+    )
+    db.update_todo(todo_id, {"status": "needs_input"})
+    await pusher.send(
+        db.list_apns_tokens(user_id),
+        PushPayload(
+            title="Review before sending",
+            body=_OUTBOUND_SEND_BLOCKED_PROMPT[:160],
+            todo_id=todo_id,
+            kind="needs_input",
+        ),
+    )
+    _write_activity(
+        db,
+        todo_id=todo_id,
+        user_id=user_id,
+        snapshot=activity.mark_terminal(
+            state="paused",
+            phase="needs_input",
+            title="Review before sending",
+            detail=_OUTBOUND_SEND_BLOCKED_PROMPT,
+        ),
+        hermes_run_id=run_id,
+    )
+    await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
+    return "needs_input"
+
+
 async def _consume_run(
     cfg: Config,
     db: DB,
@@ -890,8 +1352,19 @@ async def _consume_run(
     run_id: str,
     *,
     profile_name: str | None = None,
+    audio_requested: bool = True,
+    outbound_send_approved: bool = False,
 ) -> str:
-    """Consume the SSE stream and return the terminal status."""
+    """Consume the SSE stream and return the terminal status.
+
+    ``audio_requested`` reflects whether the USER's own words asked for
+    spoken audio (see ``user_wants_spoken_audio``). When False, every
+    audio persistence path — native text_to_speech results, the lifecycle
+    TTS fallback, promoted audio-link artifacts, and explicit
+    ``type:"audio"`` artifact blocks — is discarded with a
+    ``tts_discarded_unrequested`` log line instead of surfacing an
+    unsolicited voice memo.
+    """
     todo_id = todo["id"]
     user_id = todo["user_id"]
     terminal: str | None = None
@@ -911,6 +1384,22 @@ async def _consume_run(
     # (e.g. a short artifact line plus a longer summary). We drain the
     # stream and persist one merged ``final`` row for the chat transcript.
     pending_final: Translated | None = None
+    # Track whether the run did tool work and whether it delivered anything
+    # user-visible. If the SSE stream ends with neither a terminal event nor
+    # a deliverable after tool work, the run died mid-flight — that must
+    # surface as a failure, not a silent "Done.".
+    tools_called = False
+    artifacts_persisted = False
+
+    # Placeholder gate (Phase 4): snippets like "example.com" / "John Doe"
+    # found in outbound email/calendar artifacts during this run. Checked
+    # before we honor a `done` transition; log-only unless
+    # DOIT_PLACEHOLDER_GATE is set.
+    placeholder_hits: list[str] = []
+
+    # Outbound send gate: block email/calendar/post tools unless the user
+    # tapped Send on an approval card on this resume turn.
+    outbound_send_attempted = False
 
     # Drives the iOS "what is Hermes doing right now?" surfaces: the
     # todo card status line, the detail-view animated cards, and the
@@ -919,14 +1408,41 @@ async def _consume_run(
     latest_activity: ActivitySnapshot | None = None
     heartbeat_task: asyncio.Task | None = None
 
+    # Progress watchdog (Phase 3a): wall-clock of the last meaningful SSE
+    # event. When the gap exceeds the stall timeout the heartbeat below
+    # flips the live activity to a distinct "stalled" phase (visibility
+    # only — Hermes has no verified mid-run nudge channel yet) and drops
+    # one step row so the transcript shows the gap too.
+    stall_timeout = float(getattr(cfg, "stall_timeout_secs", 120.0) or 120.0)
+    last_progress_at = time.time()
+    stall_step_written = False
+
     async def activity_heartbeat() -> None:
+        nonlocal stall_step_written
         while True:
             await asyncio.sleep(25)
+            stalled = (time.time() - last_progress_at) > stall_timeout
+            if stalled:
+                if not stall_step_written:
+                    stall_step_written = True
+                    log.warning(
+                        "run stalled: no progress for %.0fs todo=%s run=%s",
+                        time.time() - last_progress_at, todo_id, run_id,
+                    )
+                    db.insert_step(
+                        todo_id=todo_id,
+                        user_id=user_id,
+                        kind="status",
+                        text="Still working — checking results…",
+                    )
+                snapshot = activity.stalled(latest_activity)
+            else:
+                snapshot = activity.heartbeat(latest_activity)
             _write_activity(
                 db,
                 todo_id=todo_id,
                 user_id=user_id,
-                snapshot=activity.heartbeat(latest_activity),
+                snapshot=snapshot,
                 hermes_run_id=run_id,
             )
 
@@ -944,6 +1460,32 @@ async def _consume_run(
             effect = translate(ev.event, ev.data)
             if effect is None:
                 continue
+            # Any recognized effect counts as progress for the watchdog;
+            # a fresh event also re-arms the one-shot stall step.
+            last_progress_at = time.time()
+            stall_step_written = False
+            if effect.step_kind in ("tool_started", "tool_result"):
+                tools_called = True
+            if (
+                not outbound_send_approved
+                and is_outbound_send_tool(effect.tool_name)
+                and effect.step_kind in ("tool_started", "tool_result")
+            ):
+                outbound_send_attempted = True
+                if effect.step_kind == "tool_started":
+                    return await _halt_for_unauthorized_outbound_send(
+                        db,
+                        pusher,
+                        hermes,
+                        activity,
+                        todo_id=todo_id,
+                        user_id=user_id,
+                        run_id=run_id,
+                        tool_name=effect.tool_name,
+                        draft_hint=effect.text,
+                        live_total=live_total,
+                        stop_run=True,
+                    )
             defer_final = (
                 effect.step_kind == "final" and effect.new_status == "done"
             )
@@ -973,6 +1515,15 @@ async def _consume_run(
             # event that also carries deliverables still lands them in the DB.
             artifact_text = _first_text_artifact_body(effect.artifacts) or effect.text
             for artifact in effect.artifacts:
+                if not audio_requested and (
+                    artifact.kind == "audio"
+                    or _looks_like_audio_link_artifact(artifact)
+                ):
+                    log.info(
+                        "tts_discarded_unrequested artifact todo=%s run=%s kind=%s key=%s",
+                        todo_id, run_id, artifact.kind, artifact.key,
+                    )
+                    continue
                 if await _maybe_persist_audio_link_artifact(
                     db,
                     todo_id=todo_id,
@@ -990,6 +1541,14 @@ async def _consume_run(
                     artifact=artifact,
                 ):
                     continue
+                if artifact.kind in _PLACEHOLDER_GATED_KINDS:
+                    hits = find_placeholder_matches(
+                        {"title": artifact.title, "payload": artifact.payload}
+                    )
+                    if hits:
+                        placeholder_hits.extend(
+                            h for h in hits if h not in placeholder_hits
+                        )
                 db.upsert_artifact(
                     todo_id=todo_id,
                     user_id=user_id,
@@ -999,51 +1558,67 @@ async def _consume_run(
                     payload=artifact.payload,
                     hermes_run_id=run_id,
                 )
+            if effect.artifacts:
+                artifacts_persisted = True
             if effect.tts_call is not None:
                 pending_tts[effect.tts_call.call_id] = effect.tts_call
                 pending_tts_started_at[effect.tts_call.call_id] = time.time() - 10
             if effect.tts_result is not None:
-                _persist_tts_audio(
-                    db,
-                    todo_id=todo_id,
-                    user_id=user_id,
-                    run_id=run_id,
-                    result=effect.tts_result,
-                    call=pending_tts.get(effect.tts_result.call_id),
-                )
+                if not audio_requested:
+                    log.info(
+                        "tts_discarded_unrequested tool_result todo=%s run=%s call_id=%s",
+                        todo_id, run_id, effect.tts_result.call_id,
+                    )
+                else:
+                    _persist_tts_audio(
+                        db,
+                        todo_id=todo_id,
+                        user_id=user_id,
+                        run_id=run_id,
+                        result=effect.tts_result,
+                        call=pending_tts.get(effect.tts_result.call_id),
+                    )
+                    artifacts_persisted = True
                 lifecycle_tts_uploaded = True
             if (
                 effect.step_kind == "tool_result"
                 and effect.tool_name == "text_to_speech"
                 and not lifecycle_tts_uploaded
             ):
-                call = pending_tts.get("hermes-lifecycle")
-                started_at = pending_tts_started_at.get("hermes-lifecycle", time.time() - 60)
-                file_path = _find_latest_hermes_tts_audio(
-                    cfg,
-                    profile_name=profile_name,
-                    since=started_at,
-                )
-                if file_path:
-                    _persist_tts_audio(
-                        db,
-                        todo_id=todo_id,
-                        user_id=user_id,
-                        run_id=run_id,
-                        result=TTSResult(
-                            call_id="hermes-lifecycle",
-                            file_path=str(file_path),
-                            provider="elevenlabs",
-                        ),
-                        call=call,
+                if not audio_requested:
+                    log.info(
+                        "tts_discarded_unrequested lifecycle todo=%s run=%s",
+                        todo_id, run_id,
                     )
                     lifecycle_tts_uploaded = True
                 else:
-                    log.warning(
-                        "text_to_speech completed but no local audio file found "
-                        "todo=%s run=%s profile=%s since=%.3f",
-                        todo_id, run_id, profile_name, started_at,
+                    call = pending_tts.get("hermes-lifecycle")
+                    started_at = pending_tts_started_at.get("hermes-lifecycle", time.time() - 60)
+                    file_path = _find_latest_hermes_tts_audio(
+                        cfg,
+                        profile_name=profile_name,
+                        since=started_at,
                     )
+                    if file_path:
+                        _persist_tts_audio(
+                            db,
+                            todo_id=todo_id,
+                            user_id=user_id,
+                            run_id=run_id,
+                            result=TTSResult(
+                                call_id="hermes-lifecycle",
+                                file_path=str(file_path),
+                                provider="elevenlabs",
+                            ),
+                            call=call,
+                        )
+                        lifecycle_tts_uploaded = True
+                    else:
+                        log.warning(
+                            "text_to_speech completed but no local audio file found "
+                            "todo=%s run=%s profile=%s since=%.3f",
+                            todo_id, run_id, profile_name, started_at,
+                        )
             if effect.spawned_tasks and effect.new_status == "done":
                 spawned_count = apply_spawned_tasks(
                     db,
@@ -1070,6 +1645,81 @@ async def _consume_run(
             if effect.usage_total > 0 and effect.new_status is None:
                 db.increment_todo_tokens(todo_id, effect.usage_total)
                 live_total += effect.usage_total
+            if (
+                effect.new_status == "done"
+                and outbound_send_attempted
+                and not outbound_send_approved
+            ):
+                # Send tool completed before we could abort on tool_started,
+                # or the model marked done after an unauthorized send attempt.
+                return await _halt_for_unauthorized_outbound_send(
+                    db,
+                    pusher,
+                    hermes,
+                    activity,
+                    todo_id=todo_id,
+                    user_id=user_id,
+                    run_id=run_id,
+                    tool_name=effect.tool_name,
+                    draft_hint=(
+                        "The agent attempted to send without your approval. "
+                        "Review the draft before trying again."
+                    ),
+                    live_total=live_total,
+                    stop_run=False,
+                )
+            if effect.new_status == "done" and placeholder_hits:
+                if _placeholder_gate_enforced():
+                    # The model is trying to complete with fake content in an
+                    # outbound draft (invented email, lorem ipsum, template
+                    # brackets). Pause for real details instead of "Done.".
+                    log.warning(
+                        "placeholder_gate: blocking done todo=%s run=%s matches=%s",
+                        todo_id, run_id, placeholder_hits[:10],
+                    )
+                    db.supersede_open_interactions(todo_id)
+                    db.insert_interaction(
+                        todo_id=todo_id,
+                        user_id=user_id,
+                        kind="question",
+                        prompt=_PLACEHOLDER_NEEDS_INPUT_PROMPT,
+                        payload={
+                            "freeform": True,
+                            "placeholder_matches": placeholder_hits[:10],
+                        },
+                        hermes_run_id=run_id,
+                    )
+                    db.update_todo(todo_id, {"status": "needs_input"})
+                    await pusher.send(
+                        db.list_apns_tokens(user_id),
+                        PushPayload(
+                            title="Needs your input",
+                            body=_PLACEHOLDER_NEEDS_INPUT_PROMPT[:160],
+                            todo_id=todo_id,
+                            kind="needs_input",
+                        ),
+                    )
+                    _write_activity(
+                        db,
+                        todo_id=todo_id,
+                        user_id=user_id,
+                        snapshot=activity.mark_terminal(
+                            state="paused",
+                            phase="needs_input",
+                            title="Needs your input",
+                            detail=_PLACEHOLDER_NEEDS_INPUT_PROMPT,
+                        ),
+                        hermes_run_id=run_id,
+                    )
+                    await _reconcile_run_tokens(
+                        db, hermes, todo_id, run_id, live_total
+                    )
+                    return "needs_input"
+                log.warning(
+                    "placeholder_gate: would have blocked done todo=%s run=%s "
+                    "matches=%s",
+                    todo_id, run_id, placeholder_hits[:10],
+                )
             if effect.new_status:
                 fields: dict = {"status": effect.new_status}
                 if effect.new_status == "done":
@@ -1110,6 +1760,19 @@ async def _consume_run(
                     return "needs_auth"
 
                 if effect.new_status == "needs_input" and effect.interaction is not None:
+                    if effect.interaction.kind == "approval":
+                        # Log-only here: the approval card pauses for human
+                        # review anyway, but the hit rate tells us how often
+                        # drafts reach the user with fake content.
+                        draft_hits = find_placeholder_matches(
+                            effect.interaction.payload
+                        )
+                        if draft_hits:
+                            log.warning(
+                                "placeholder_gate: approval draft has "
+                                "placeholder content todo=%s run=%s matches=%s",
+                                todo_id, run_id, draft_hits[:10],
+                            )
                     # Replace any previously-open interaction so the UI only ever
                     # shows one actionable card at a time.
                     db.supersede_open_interactions(todo_id)
@@ -1174,6 +1837,31 @@ async def _consume_run(
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
+    if (
+        terminal == "done"
+        and not artifacts_persisted
+        and _structured_repair_enabled()
+        and _expects_structured_output(todo)
+    ):
+        # The task is the kind that should end in an email/calendar artifact
+        # or an approval card, but the run completed with neither — the model
+        # likely did the work and dropped the contract blocks. One cheap
+        # repair turn (no tools) on the same session re-requests them.
+        repaired = await _attempt_structured_repair(
+            db,
+            pusher,
+            hermes,
+            todo_id=todo_id,
+            user_id=user_id,
+            run_id=run_id,
+            activity=activity,
+        )
+        if repaired == "needs_input":
+            await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
+            return "needs_input"
+        if repaired == "done":
+            artifacts_persisted = True
+
     if pending_final is not None:
         db.insert_step(
             todo_id=todo_id,
@@ -1213,28 +1901,69 @@ async def _consume_run(
             hermes_run_id=run_id,
         )
     if terminal is None:
-        # If the stream ends without an explicit terminal event, treat the
-        # run as successful rather than leaving the todo stuck in running.
-        db.insert_step(
-            todo_id=todo_id,
-            user_id=user_id,
-            kind="final",
-            text="Done.",
-        )
-        db.update_todo(todo_id, {"status": "done"})
-        _write_activity(
-            db,
-            todo_id=todo_id,
-            user_id=user_id,
-            snapshot=activity.mark_terminal(
-                state="completed",
-                phase="done",
-                title="Done",
-                detail="Done.",
-            ),
-            hermes_run_id=run_id,
-        )
-        terminal = "done"
+        if tools_called and not artifacts_persisted:
+            # The agent did tool work and then the stream ended with no
+            # final text, no artifacts, and no interaction. That is a run
+            # that died mid-flight (model gave up, provider dropped the
+            # stream, ...). Marking it "Done." would silently swallow the
+            # failure — surface it so the user can retry or ask.
+            log.warning(
+                "run ended without terminal event or deliverable; failing "
+                "todo=%s run=%s",
+                todo_id,
+                run_id,
+            )
+            failure_text = (
+                "The agent stopped before finishing. Tap to retry or ask "
+                "what happened."
+            )
+            db.insert_step(
+                todo_id=todo_id,
+                user_id=user_id,
+                kind="error",
+                text=failure_text,
+            )
+            db.update_todo(
+                todo_id,
+                {"status": "failed", "error_message": failure_text},
+            )
+            _write_activity(
+                db,
+                todo_id=todo_id,
+                user_id=user_id,
+                snapshot=activity.mark_terminal(
+                    state="failed",
+                    phase="failed",
+                    title="Stopped early",
+                    detail=failure_text,
+                ),
+                hermes_run_id=run_id,
+            )
+            terminal = "failed"
+        else:
+            # No tool work happened (trivial run) or deliverables already
+            # landed mid-stream — treat the quiet stream end as success
+            # rather than leaving the todo stuck in running.
+            db.insert_step(
+                todo_id=todo_id,
+                user_id=user_id,
+                kind="final",
+                text="Done.",
+            )
+            db.update_todo(todo_id, {"status": "done"})
+            _write_activity(
+                db,
+                todo_id=todo_id,
+                user_id=user_id,
+                snapshot=activity.mark_terminal(
+                    state="completed",
+                    phase="done",
+                    title="Done",
+                    detail="Done.",
+                ),
+                hermes_run_id=run_id,
+            )
+            terminal = "done"
     if terminal in ("done", "failed"):
         db.supersede_open_interactions(todo_id)
         await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
@@ -1743,6 +2472,98 @@ def _short(s: str, limit: int = 80) -> str:
     return s if len(s) <= limit else s[: limit - 1] + "\u2026"
 
 
+# A short read-only query/listing task: starts with a lookup verb and never
+# mentions creating, sending, or changing anything. Running a second Hermes
+# pass to mine memories out of "List the Github repos you have access to"
+# costs a full LLM call and mostly produces junk suggestions.
+_TRIVIAL_READONLY_LEAD = re.compile(
+    r"^\s*(?:can you |could you |please )?"
+    r"(?:list|show(?:\s+me)?|what(?:'s|\s+is|\s+are)?|how\s+many|count|"
+    r"check|look\s*up|tell\s+me|get|fetch|display|read)\b",
+    re.IGNORECASE,
+)
+
+_MUTATING_WORDS = re.compile(
+    r"\b(?:send|create|draft|write|book|schedule|post|update|delete|remove|"
+    r"add|make|build|buy|order|reserve|invite|upload|reply|email\s+\w+|"
+    r"remind|note|save|remember|set\s+up)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_trivial_readonly_todo(todo: dict) -> bool:
+    """True for short lookup/listing tasks not worth a memory-extraction run."""
+    combined = " ".join(
+        str(todo.get(k) or "").strip()
+        for k in ("original_title", "title", "detail")
+    ).strip()
+    if not combined or len(combined) > 220:
+        return False
+    lead_text = str(
+        todo.get("original_title") or todo.get("title") or ""
+    ).strip()
+    if not _TRIVIAL_READONLY_LEAD.match(lead_text):
+        return False
+    return not _MUTATING_WORDS.search(combined)
+
+
+def _memory_model_override() -> str | None:
+    """Fixed cheap model for post-task memory extraction (DOIT_MEMORY_MODEL).
+
+    Unset by default: extraction reuses the user's Hermes profile model.
+    When set, the runner calls the model directly (extraction is JSON-only,
+    no tools) so a GPT 5.5 agent doesn't pay 5.5 prices to mine memories.
+    """
+    model = os.getenv("DOIT_MEMORY_MODEL", "").strip()
+    return model or None
+
+
+async def _extract_memories_text_direct(prompt: str, *, model: str) -> str | None:
+    """Run the extraction prompt against a fixed model via chat completions.
+
+    Hermes has no per-run model override (model choice is profile-level in
+    config.yaml), but extraction needs no tools or session state — a plain
+    chat-completions call is equivalent. OpenRouter is preferred (handles
+    cross-provider slugs like "google/gemini-..."), OpenAI is the fallback.
+    Returns ``None`` on any failure so the caller falls back to the normal
+    Hermes-profile extraction run.
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        url = "https://api.openai.com/v1/chat/completions"
+    if not api_key:
+        log.warning(
+            "DOIT_MEMORY_MODEL=%s set but no OPENROUTER_API_KEY/OPENAI_API_KEY; "
+            "falling back to Hermes extraction",
+            model,
+        )
+        return None
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": MEMORY_EXTRACT_INSTRUCTIONS},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        choices = data.get("choices") or []
+        message = (choices[0] if choices else {}).get("message") or {}
+        return str(message.get("content") or "")
+    except Exception as e:
+        log.warning("direct memory extraction failed model=%s: %s", model, e)
+        return None
+
+
 async def _extract_memories_after_todo(
     db: DB,
     todo: dict,
@@ -1753,6 +2574,9 @@ async def _extract_memories_after_todo(
     """Run Doit's post-task memory extraction pass for a completed todo."""
     todo_id = str(todo["id"])
     user_id = str(todo["user_id"])
+    if _is_trivial_readonly_todo(todo):
+        log.info("memory extraction skipped for trivial todo %s", todo_id)
+        return
     settings = db.get_memory_settings(user_id)
     if settings.get("automatic_suggestions_enabled") is False:
         return
@@ -1764,24 +2588,31 @@ async def _extract_memories_after_todo(
         custom_instructions=settings.get("custom_instructions"),
     )
 
-    hermes = HermesClient(endpoint)
-    run_id: str | None = None
-    try:
-        run_id = await hermes.start_run(
-            prompt,
-            session_id=f"doit-memory-extract-{todo_id}",
-            session_key=_session_key_for_user(user_id),
-            instructions=MEMORY_EXTRACT_INSTRUCTIONS,
+    final_text: str | None = None
+    memory_model = _memory_model_override()
+    if memory_model:
+        final_text = await _extract_memories_text_direct(
+            prompt, model=memory_model
         )
-        final_text = await asyncio.wait_for(
-            _collect_memory_extraction_text(hermes, run_id),
-            timeout=90.0,
-        )
-    finally:
-        with suppress(Exception):
-            if run_id is not None:
-                await hermes.stop_run(run_id)
-        await hermes.aclose()
+    if final_text is None:
+        hermes = HermesClient(endpoint)
+        run_id: str | None = None
+        try:
+            run_id = await hermes.start_run(
+                prompt,
+                session_id=f"doit-memory-extract-{todo_id}",
+                session_key=_session_key_for_user(user_id),
+                instructions=MEMORY_EXTRACT_INSTRUCTIONS,
+            )
+            final_text = await asyncio.wait_for(
+                _collect_memory_extraction_text(hermes, run_id),
+                timeout=90.0,
+            )
+        finally:
+            with suppress(Exception):
+                if run_id is not None:
+                    await hermes.stop_run(run_id)
+            await hermes.aclose()
 
     candidates = parse_memory_extraction(final_text or "")
     if not candidates:

@@ -166,10 +166,6 @@ struct TodoListView: View {
                 .onChange(of: cronHandoffSignature) { _, _ in
                     reconcilePendingCronHandoff()
                 }
-                .onChange(of: suggestionsRefreshSignature) { _, _ in
-                    guard suggestionsHasLoaded else { return }
-                    Task { await refreshSuggestions() }
-                }
                 .onChange(of: push.pendingTodoID) { _, newID in
                     guard let id = newID else { return }
                     // Push tap → open that todo. Refresh its row first so the
@@ -349,7 +345,6 @@ struct TodoListView: View {
             }
             .refreshable {
                 await store.loadAll()
-                await refreshSuggestions()
             }
             .task {
                 await loadInitialSuggestionsIfNeeded()
@@ -361,6 +356,7 @@ struct TodoListView: View {
     private func completedActivitySection(_ completedItems: [Todo]) -> some View {
         CompletedActivityToggle(
             selection: selectedCompletedActivityFilter,
+            allActivityCount: completedItems.count,
             onSelect: setCompletedActivityFilter
         )
         .padding(.top, 4)
@@ -411,25 +407,12 @@ struct TodoListView: View {
             ForEach(completedItems) { todo in
                 todoCard(for: todo, identityScope: filter.rawValue)
             }
-        case .starred:
-            let starredItems = completedItems.filter(\.is_starred)
-            if starredItems.isEmpty {
-                ActivityEmptyCard(
-                    title: "No starred tasks yet",
-                    message: "Star completed tasks from the task detail menu to keep them here.",
-                    systemImage: "star.fill"
-                )
-            } else {
-                ForEach(starredItems) { todo in
-                    todoCard(for: todo, identityScope: filter.rawValue)
-                }
-            }
         case .topics:
             let summaries = activityGroupSummaries(from: completedItems)
             if summaries.isEmpty {
                 ActivityEmptyCard(
-                    title: "No topics yet",
-                    message: "Completed tasks will appear here once doit assigns topics or collections.",
+                    title: "No categories yet",
+                    message: "Completed tasks will appear here once doit assigns categories or collections.",
                     systemImage: "square.grid.2x2.fill"
                 )
             } else {
@@ -458,13 +441,18 @@ struct TodoListView: View {
         identityScope: String? = nil,
         onOpenOverride: (() -> Void)? = nil
     ) -> some View {
-        let interaction = store.openInteractions[todo.id]
-        let activity = store.agentActivityByTodoID[todo.id]
-        let isDeleting = deletingTodoIDs.contains(todo.id)
-        let identity = identityScope.map { "\(todo.id.uuidString):\($0)" } ?? todo.id.uuidString
+        // Read the latest row from the store so prep / realtime updates
+        // aren't stuck behind a ForEach snapshot. Cron cards already use
+        // `cronJobRefreshID`; todo cards need the same refresh id pattern.
+        let liveTodo = store.todo(id: todo.id) ?? todo
+        let interaction = store.openInteractions[liveTodo.id]
+        let activity = store.agentActivityByTodoID[liveTodo.id]
+        let isDeleting = deletingTodoIDs.contains(liveTodo.id)
+        let refreshID = cardRefreshID(for: liveTodo)
+        let viewID = identityScope.map { "\($0):\(refreshID)" } ?? refreshID
         TodoCard(
-            todo: todo,
-            connectionSlugs: connectionSlugs(for: todo),
+            todo: liveTodo,
+            connectionSlugs: connectionSlugs(for: liveTodo),
             interaction: interaction,
             activity: activity,
             isResponding: store.respondingInteractionID != nil
@@ -474,26 +462,26 @@ struct TodoListView: View {
                 if let onOpenOverride {
                     onOpenOverride()
                 } else {
-                    navigationPath.append(TodoListDestination.todo(todo.id))
+                    navigationPath.append(TodoListDestination.todo(liveTodo.id))
                 }
             },
-            onDoIt: { Task { await store.request(todo) } },
-            onToggleComplete: { Task { await store.toggleComplete(todo) } },
+            onDoIt: { Task { await store.request(liveTodo) } },
+            onToggleComplete: { Task { await store.toggleComplete(liveTodo) } },
             onRespond: { interaction, optionID, text in
                 Task {
                     await store.respond(
                         to: interaction,
-                        todo: todo,
+                        todo: liveTodo,
                         optionID: optionID,
                         text: text
                     )
                 }
             }
         )
-        .id(identity)
+        .id(viewID)
         .modifier(
             OptionalMatchedGeometryEffect(
-                id: identityScope == nil ? (cronHandoffGeometryID(forTodo: todo.id) ?? todo.id.uuidString) : nil,
+                id: identityScope == nil ? (cronHandoffGeometryID(forTodo: liveTodo.id) ?? liveTodo.id.uuidString) : nil,
                 namespace: taskCardNamespace,
                 isSource: true
             )
@@ -501,10 +489,10 @@ struct TodoListView: View {
         .opacity(isDeleting ? 0 : 1)
         .scaleEffect(isDeleting ? 0.96 : 1)
         .offset(x: isDeleting ? 28 : 0)
-        .allowsHitTesting(!isDeleting && cronHandoffGeometryID(forTodo: todo.id) == nil)
+        .allowsHitTesting(!isDeleting && cronHandoffGeometryID(forTodo: liveTodo.id) == nil)
         .animation(.smooth(duration: 0.24), value: isDeleting)
         .contextMenu {
-            todoContextMenuAction(for: todo)
+            todoContextMenuAction(for: liveTodo)
         }
     }
 
@@ -1016,7 +1004,7 @@ struct TodoListView: View {
 
     private var taskLayoutSignature: String {
         store.todos
-            .map { "\($0.id.uuidString):\($0.status.rawValue):\($0.is_starred):\($0.topic ?? ""):\($0.collection_name ?? ""):\($0.updated_at.ISO8601Format())" }
+            .map { "\($0.id.uuidString):\($0.status.rawValue):\($0.topic ?? ""):\($0.collection_name ?? ""):\($0.updated_at.ISO8601Format())" }
             .joined(separator: "|")
     }
 
@@ -1027,12 +1015,6 @@ struct TodoListView: View {
             store.todos.map(\.id.uuidString).joined(separator: ","),
             store.cronJobs.map { "\($0.id.uuidString):\($0.created_at.ISO8601Format())" }.joined(separator: ",")
         ].joined(separator: "|")
-    }
-
-    private var suggestionsRefreshSignature: String {
-        let completed = store.todos.filter { $0.status == .done }
-        let latest = completed.max(by: { $0.updated_at < $1.updated_at })?.updated_at.ISO8601Format() ?? ""
-        return "\(completed.count)|\(latest)"
     }
 
     private var displayedSuggestedTasks: [SuggestedTask] {
@@ -1296,14 +1278,6 @@ struct TodoListView: View {
 
     private func loadInitialSuggestionsIfNeeded() async {
         guard !suggestionsHasLoaded, !suggestionsLoading else { return }
-        await loadMoreSuggestions()
-    }
-
-    private func refreshSuggestions() async {
-        suggestedTasks = []
-        suggestionsHasLoaded = false
-        suggestionsError = nil
-        centeredSuggestedTaskID = nil
         await loadMoreSuggestions()
     }
 
@@ -2888,7 +2862,6 @@ private enum ExploreCardStyle: Hashable {
 
 private enum CompletedActivityFilter: String, CaseIterable, Identifiable {
     case allActivity
-    case starred
     case topics
 
     var id: String { rawValue }
@@ -2896,16 +2869,14 @@ private enum CompletedActivityFilter: String, CaseIterable, Identifiable {
     var index: Int {
         switch self {
         case .allActivity: return 0
-        case .starred: return 1
-        case .topics: return 2
+        case .topics: return 1
         }
     }
 
     var title: String {
         switch self {
         case .allActivity: return "All Activity"
-        case .starred: return "Starred"
-        case .topics: return "Topics"
+        case .topics: return "Categories"
         }
     }
 }
@@ -3013,6 +2984,7 @@ private struct ActivityGroupSummary: Identifiable, Hashable {
 
 private struct CompletedActivityToggle: View {
     let selection: CompletedActivityFilter
+    let allActivityCount: Int
     let onSelect: (CompletedActivityFilter) -> Void
 
     var body: some View {
@@ -3037,7 +3009,7 @@ private struct CompletedActivityToggle: View {
                         Button {
                             onSelect(filter)
                         } label: {
-                            Text(filter.title)
+                            segmentLabel(for: filter)
                                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 .foregroundStyle(selection == filter ? Color.black : Color.black.opacity(0.48))
                                 .frame(maxWidth: .infinity)
@@ -3053,6 +3025,20 @@ private struct CompletedActivityToggle: View {
         }
         .frame(height: 46)
         .background(Color.black.opacity(0.05), in: Capsule())
+    }
+
+    @ViewBuilder
+    private func segmentLabel(for filter: CompletedActivityFilter) -> some View {
+        if filter == .allActivity {
+            HStack(spacing: 6) {
+                Text(filter.title)
+                Text("\(allActivityCount)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(selection == filter ? Color.black.opacity(0.42) : Color.black.opacity(0.30))
+            }
+        } else {
+            Text(filter.title)
+        }
     }
 }
 
@@ -3300,6 +3286,9 @@ private struct CronJobCard: View {
     private static let scheduleSymbol =
         "clock.arrow.trianglehead.counterclockwise.rotate.90"
     private static let cornerRadius: CGFloat = 30
+    private static let contentHorizontalPadding: CGFloat = 14
+    private static let contentTopPadding: CGFloat = 12
+    private static let contentBottomPadding: CGFloat = 16
     private static let footerBackground = Color(
         red: 0xF6 / 255,
         green: 0xF7 / 255,
@@ -3342,7 +3331,9 @@ private struct CronJobCard: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(TodoCardStyle.cardPadding)
+            .padding(.horizontal, Self.contentHorizontalPadding)
+            .padding(.top, Self.contentTopPadding)
+            .padding(.bottom, Self.contentBottomPadding)
             .background {
                 UnevenRoundedRectangle(
                     cornerRadii: .init(
@@ -3387,7 +3378,7 @@ private struct CronJobCard: View {
                     .accessibilityLabel(job.state == .paused ? "Resume schedule" : "Pause schedule")
                 }
             }
-            .padding(.horizontal, TodoCardStyle.cardPadding)
+            .padding(.horizontal, Self.contentHorizontalPadding)
             .padding(.vertical, 8)
             .background(Self.footerBackground)
         }
@@ -3546,19 +3537,14 @@ private struct TodoCard: View {
     private var topRowTrailing: some View {
         Group {
             if connectionSlugs.isEmpty {
-                if todo.is_starred {
-                    StarConnectionChip(size: TodoCardStyle.connectionLogoChipSize)
-                } else {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.black.opacity(0.28))
-                        .frame(width: 20, height: 20)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.black.opacity(0.28))
+                    .frame(width: 20, height: 20)
             } else {
                 ConnectionLogosRow(
                     slugs: connectionSlugs,
-                    chipSize: TodoCardStyle.connectionLogoChipSize,
-                    showsStar: todo.is_starred
+                    chipSize: TodoCardStyle.connectionLogoChipSize
                 )
             }
         }
@@ -3806,18 +3792,15 @@ struct PillButton: View {
 /// Stacked Composio toolkit logos (e.g. Sheets + Gmail on one task).
 struct ConnectionLogosRow: View {
     let slugs: [String]
-    let showsStar: Bool
     private let chipSize: CGFloat
 
-    init(slugs: [String], chipSize: CGFloat = 24, showsStar: Bool = false) {
+    init(slugs: [String], chipSize: CGFloat = 24) {
         self.slugs = slugs
-        self.showsStar = showsStar
         self.chipSize = chipSize
     }
 
-    init(slugs: [String], iconSize: CGFloat, spacing _: CGFloat, showsStar: Bool = false) {
+    init(slugs: [String], iconSize: CGFloat, spacing _: CGFloat) {
         self.slugs = slugs
-        self.showsStar = showsStar
         self.chipSize = iconSize + 8
     }
 
@@ -3826,16 +3809,13 @@ struct ConnectionLogosRow: View {
     }
 
     var body: some View {
-        if !slugs.isEmpty || showsStar {
+        if !slugs.isEmpty {
             HStack(spacing: -overlap) {
                 ForEach(slugs, id: \.self) { slug in
                     ConnectionLogoChip(slug: slug, size: chipSize)
                 }
-                if showsStar {
-                    StarConnectionChip(size: chipSize)
-                }
             }
-            .animation(.smooth(duration: 0.25), value: slugs + (showsStar ? ["__star"] : []))
+            .animation(.smooth(duration: 0.25), value: slugs)
         }
     }
 }
@@ -3854,23 +3834,6 @@ private struct ConnectionLogoChip: View {
                     .strokeBorder(Color.black.opacity(0.10), lineWidth: 1)
             }
             .accessibilityLabel("Connection: \(slug)")
-    }
-}
-
-private struct StarConnectionChip: View {
-    let size: CGFloat
-
-    var body: some View {
-        Image(systemName: "star.fill")
-            .font(.system(size: size * 0.46, weight: .bold, design: .rounded))
-            .foregroundStyle(Color.yellow)
-            .frame(width: size, height: size)
-            .background(Color.white, in: Circle())
-            .overlay {
-                Circle()
-                    .strokeBorder(Color.black.opacity(0.10), lineWidth: 1)
-            }
-            .accessibilityLabel("Starred")
     }
 }
 

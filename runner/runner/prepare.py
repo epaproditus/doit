@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -153,14 +154,25 @@ PREP_INSTRUCTIONS = (
     "One-off tasks are kind=\"task\" (default). Cron jobs must include "
     "schedule and schedule_display; set ready=true unless the recurrence "
     "pattern itself is ambiguous.\n"
-    "- CRITICAL kind examples (follow exactly):\n"
+    "- CRITICAL kind decision table (follow exactly):\n"
     "  * \"Every morning at 9am check email and create tasks\" → "
     "kind=cron, schedule=\"0 9 * * *\", schedule_display=\"Every day at 9:00 AM\"\n"
     "  * \"Check my inbox every 2 hours\" → kind=cron, schedule=\"every 2h\", "
     "schedule_display=\"Every 2 hours\"\n"
+    "  * \"Check the news site every Tuesday\" → kind=cron, "
+    "schedule=\"0 9 * * 2\", schedule_display=\"Every Tuesday at 9:00 AM\"\n"
+    "  * \"Remind me tomorrow at 3pm to call mom\" → kind=task (a one-off "
+    "reminder, even though it has a time)\n"
+    "  * \"Check X website on Tuesday and tell me what it says\" → kind=task "
+    "(a single dated task, not a recurrence)\n"
     "  * \"Send an email to John\" → kind=task (no schedule fields)\n"
-    "  If the input mentions daily/hourly/weekly/every/each/recurring, "
-    "kind MUST be cron — never kind=task for those.\n"
+    "  * \"Create a Google Doc where I'll send bugs every now and then\" → "
+    "kind=task (future use is not a schedule; never invent one)\n"
+    "  kind=cron ONLY when the user asks Doit to RUN something on a cadence "
+    "(daily/hourly/weekly/every <unit>/each <unit>/recurring). A one-off "
+    "date or time, or vague future use (\"every now and then\", "
+    "\"occasionally\", \"whenever\"), is kind=task. Never invent a default "
+    "schedule the user did not ask for.\n"
     "- Wall-clock cron times (e.g. \"0 9 * * *\") are evaluated in the "
     "user's local timezone — the runner pins each new cron job to the "
     "timezone the user is in when they create it. Treat \"9am\" as 9am "
@@ -342,6 +354,7 @@ def build_prepare_prompt(
     prior: dict[str, Any] | None = None,
     attachment_urls: list[str] | None = None,
     organization_examples: list[dict[str, Any]] | None = None,
+    attachment_count: int = 0,
 ) -> str:
     """Build the per-todo input the runner sends to Hermes for preparation.
 
@@ -372,7 +385,9 @@ def build_prepare_prompt(
     ]
     if organization_examples:
         lines += ["", "Existing organization examples for this user:"]
-        for example in organization_examples[:20]:
+        # Cap at 8: prep is a classification pass, not a recall task — a
+        # few examples anchor topic/collection style without the token tax.
+        for example in organization_examples[:8]:
             title_text = _clean_str(example.get("title"), max_len=90)
             topic = _clean_str(example.get("topic"), max_len=32)
             collection_name = _clean_collection_name(example.get("collection_name"))
@@ -400,6 +415,16 @@ def build_prepare_prompt(
             "ready=true unless something materially new is still missing. "
             "Do not ask the same question again."
         )
+    if attachment_count and not attachment_urls:
+        # Signing URLs costs a round-trip per attachment and prep should
+        # not analyze images anyway — the count is enough to pick a slug
+        # and write a sharper title. Execution gets the real signed URLs.
+        lines += [
+            "",
+            f"The user attached {attachment_count} image(s). Signed URLs "
+            "will be provided at execution time; factor the attachment "
+            "into the title and connection_slug but do not analyze it now.",
+        ]
     base = "\n".join(lines)
 
     # Reuse the same Attachments block format as the execution prompt so the
@@ -409,13 +434,36 @@ def build_prepare_prompt(
     return _append_attachments(base, attachment_urls)
 
 
-# Recurrence hints the model sometimes misses — used as a safety net.
-_RECURRING_HINT = re.compile(
+# Phrases that read like "every ..." but describe irregular, user-driven
+# future use — never a schedule Doit should run on. Stripped from the text
+# before recurrence detection so e.g. "send bugs every now and then" cannot
+# promote a one-off setup task to cron.
+_ONE_OFF_PHRASES = re.compile(
     r"\b("
-    r"every|each|daily|hourly|weekly|monthly|recurring|"
-    r"every\s+(?:morning|evening|night|week|day|hour)|"
-    r"(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b"
+    r"every\s+now\s+and\s+then|every\s+once\s+in\s+a\s+while|"
+    r"now\s+and\s+then|once\s+in\s+a\s+while|from\s+time\s+to\s+time|"
+    r"occasionally|sporadically|whenever|every\s+time\b"
     r")",
+    re.IGNORECASE,
+)
+
+# An explicit recurrence directive: the user asked for something to happen on
+# a cadence. "every"/"each" must be anchored to a schedulable unit so that
+# bare clock times ("remind me tomorrow at 3pm") and irregular phrases
+# ("every now and then") never count as recurring. Shared by the promote
+# (augment_cron_from_text) and demote (demote_unrequested_cron) safety nets
+# so they can never disagree.
+_RECURRENCE_DIRECTIVE = re.compile(
+    r"\b(?:"
+    r"daily|hourly|weekly|monthly|nightly|recurring|"
+    r"(?:every|each)\s+(?:other\s+)?(?:\d+\s*)?"
+    r"(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|"
+    r"d|day|days|week|weeks|month|months|"
+    r"morning|mornings|evening|evenings|night|nights|"
+    r"afternoon|afternoons|weekday|weekdays|weekend|weekends|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -430,18 +478,54 @@ _AT_TIME = re.compile(
     re.IGNORECASE,
 )
 
+_WEEKDAY_DIRECTIVE = re.compile(
+    r"(?:every|each)\s+(?:other\s+)?"
+    r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+    re.IGNORECASE,
+)
+
+# Cron day-of-week numbers (0=Sunday).
+_WEEKDAY_DOW = {
+    "sunday": 0,
+    "monday": 1,
+    "tuesday": 2,
+    "wednesday": 3,
+    "thursday": 4,
+    "friday": 5,
+    "saturday": 6,
+}
+
+
+def has_recurrence_directive(raw_text: str) -> bool:
+    """True when the user explicitly asked for a recurring cadence.
+
+    This is the single source of truth for both safety nets: promotion
+    (model said task, text says recurring) and demotion (model said cron,
+    text never asked for one). Irregular "future use" phrasing like
+    "every now and then" is excluded.
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return False
+    cleaned = _ONE_OFF_PHRASES.sub(" ", text)
+    return bool(_RECURRENCE_DIRECTIVE.search(cleaned))
+
 
 def infer_recurring_schedule(raw_text: str) -> tuple[str, str] | None:
     """Best-effort schedule inference from the user's raw input.
 
     Returns ``(schedule, schedule_display)`` or ``None`` if the text does not
-    look recurring. Used when the prep model returns kind=task for an input
-    that clearly asks for automation.
+    contain an explicit recurrence directive. Used when the prep model
+    returns kind=task for an input that clearly asks for automation.
+
+    One-off inputs with bare clock times ("remind me tomorrow at 3pm") and
+    irregular future-use phrasing ("send bugs every now and then") must
+    return ``None`` — those are normal tasks, not cron jobs.
     """
     text = (raw_text or "").strip()
-    if not text or not _RECURRING_HINT.search(text):
+    if not text or not has_recurrence_directive(text):
         return None
-    lower = text.lower()
+    lower = _ONE_OFF_PHRASES.sub(" ", text.lower())
 
     m = _EVERY_N_UNIT.search(lower)
     if m:
@@ -459,6 +543,19 @@ def infer_recurring_schedule(raw_text: str) -> tuple[str, str] | None:
 
     if re.search(r"\bweekly|every week\b", lower):
         return ("0 9 * * 1", "Every week on Monday at 9:00 AM")
+
+    wd = _WEEKDAY_DIRECTIVE.search(lower)
+    if wd:
+        day = wd.group(1).lower()
+        dow = _WEEKDAY_DOW[day]
+        tm = _AT_TIME.search(lower[wd.end():])
+        if tm:
+            hour, minute, meridiem = _parse_clock(tm)
+            return (
+                f"{minute} {hour} * * {dow}",
+                f"Every {day.capitalize()} at {_format_clock(hour, minute, meridiem)}",
+            )
+        return (f"0 9 * * {dow}", f"Every {day.capitalize()} at 9:00 AM")
 
     if "every morning" in lower or "each morning" in lower:
         return ("0 9 * * *", "Every day at 9:00 AM")
@@ -484,11 +581,9 @@ def infer_recurring_schedule(raw_text: str) -> tuple[str, str] | None:
             f"Every day at {_format_clock(hour, minute, meridiem)}",
         )
 
-    # Generic recurrence without a parseable time — default to daily 9am.
-    if _RECURRING_HINT.search(text):
-        return ("0 9 * * *", "Every day at 9:00 AM")
-
-    return None
+    # Explicit recurrence directive without a parseable time — default to
+    # daily 9am. We already know the directive is present (checked above).
+    return ("0 9 * * *", "Every day at 9:00 AM")
 
 
 def augment_cron_from_text(result: PrepResult, raw_text: str) -> PrepResult:
@@ -516,6 +611,256 @@ def augment_cron_from_text(result: PrepResult, raw_text: str) -> PrepResult:
         "ready": True,
     }
     return replace(result, **updates)
+
+
+def demote_unrequested_cron(result: PrepResult, raw_text: str) -> PrepResult:
+    """Demote model-hallucinated cron jobs back to one-off tasks.
+
+    Smaller models sometimes invent a schedule ("Daily at 9:00 AM") for
+    inputs that only describe future use, e.g. "create a doc where I'll
+    send bugs every now and then". If the model returned kind=cron but the
+    raw user text contains no explicit recurrence directive, this guard
+    demotes the result to a normal task and clears the schedule fields.
+
+    Uses the same recurrence detector as ``augment_cron_from_text`` so the
+    promote and demote safety nets can never disagree.
+    """
+    if not result.is_cron:
+        return result
+    if has_recurrence_directive(raw_text):
+        return result
+
+    log.info(
+        "prep cron guard: demoting unrequested cron schedule=%r from text=%r",
+        result.schedule,
+        (raw_text or "")[:120],
+    )
+    return replace(
+        result,
+        kind="task",
+        schedule=None,
+        schedule_display=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic prep fast-path (DOIT_PREP_FAST_PATH)
+# ---------------------------------------------------------------------------
+
+
+def prep_fast_path_enabled() -> bool:
+    """Whether the deterministic prep bypass is on (off by default).
+
+    The LLM prep pass stays the common path — it makes decisions (one-off
+    vs recurring gray zones, title rewrite, connection slug) that regex
+    can't. The fast path only skips Hermes for the narrow obvious cases.
+    """
+    return os.getenv("DOIT_PREP_FAST_PATH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@dataclass
+class FastPathDecision:
+    """Verdict from the deterministic prep classifier.
+
+    ``kind="task"`` → queue as-is (trivial bare reminder); ``kind="cron"``
+    → insert a cron job directly with the inferred schedule.
+    """
+
+    kind: str
+    schedule: str | None = None
+    schedule_display: str | None = None
+
+
+# Anything that smells like tool work, an external site, or a connected
+# service must go through LLM prep so it gets a connection_slug, a title
+# rewrite, and the one-off vs recurring judgment call.
+_FAST_PATH_TOOL_HINT = re.compile(
+    r"\b(email|e-?mail|gmail|inbox|send|reply|forward|draft|check|search|"
+    r"find|look\s*up|book|buy|purchase|order|schedule|calendar|invite|"
+    r"meeting|browse|website|site|web|post|tweet|message|slack|notion|"
+    r"sheet|doc|docs|figma|github|linear|reddit|linkedin|summarize|"
+    r"research|compare|track|monitor|scan|review|analyze|update|create|"
+    r"build|make|write|fetch|download|upload|list)\b",
+    re.IGNORECASE,
+)
+
+_FAST_PATH_URL = re.compile(
+    r"(https?://|www\.|\.com\b|\.org\b|\.net\b|\.io\b|\.dev\b|\.app\b)",
+    re.IGNORECASE,
+)
+
+# "on Tuesday" style date-qualified tasks are exactly the one-off vs
+# recurring gray zone the LLM should judge — never fast-path them.
+_FAST_PATH_DATE_QUALIFIER = re.compile(
+    r"\bon\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|the\s+\d{1,2}(?:st|nd|rd|th)?)\b",
+    re.IGNORECASE,
+)
+
+# Cadences specific enough to convert deterministically. The generic
+# inferencer falls back to "daily 9am" for any directive it can't parse
+# ("every other weekend") — that fallback is fine as a safety net for the
+# LLM path but not confident enough to skip the LLM entirely.
+_FAST_PATH_CONFIDENT_CADENCE = re.compile(
+    r"\b(daily|hourly|weekly|nightly|"
+    r"every\s+(?:day|hour|week|morning|evening|night|weekday)|"
+    r"each\s+(?:day|morning|evening|night)|"
+    r"(?:every|each)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"every\s+\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days))\b",
+    re.IGNORECASE,
+)
+
+_BARE_REMINDER = re.compile(r"^\s*remind\s+me\b", re.IGNORECASE)
+
+_EXPLICIT_TIME = re.compile(
+    r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b|"
+    r"\b(tomorrow|tonight|today|noon|midnight)\b",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Complexity signals (Phase 2e): tasks that must keep the full agent lane.
+# Research+creation, multiple outputs, external actions, and comparison
+# workflows must never be fast-pathed or simplified deterministically —
+# they need artifacts, approvals, and progress handling.
+# ---------------------------------------------------------------------------
+
+_COMPLEX_RESEARCH_CREATE = re.compile(
+    r"\b(?:find|research|look\s*up|search)\b.*\b(?:and|then)\b.*"
+    r"\b(?:build|create|draft|make|write|put\s+together)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_COMPLEX_EXTERNAL_ACTION = re.compile(
+    r"\b(send|book|purchase|buy|reserve|post|invite|outreach)\b",
+    re.IGNORECASE,
+)
+
+_COMPLEX_WORKFLOW = re.compile(
+    r"\b(travel|trip|flight|flights|hotel|hotels|moving|move\s+(?:from|to)|"
+    r"relocat\w*|shopping|vendor|vendors|itinerary)\b",
+    re.IGNORECASE,
+)
+
+_COMPLEX_COMPARISON = re.compile(
+    r"\b(options?|compare|comparison|vet|vetted|best|solid|shortlist|"
+    r"short-list)\b",
+    re.IGNORECASE,
+)
+
+_COMPLEX_MULTI_OUTPUT = re.compile(
+    r"(?:\b(?:spreadsheet|sheet|doc|document)\b.*\b(?:email|invite|calendar)\b)|"
+    r"(?:\b(?:email|invite|calendar)\b.*\b(?:spreadsheet|sheet|doc|document)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_complex_task(raw_text: str) -> bool:
+    """True when the input matches any full-agent-lane complexity signal."""
+    text = (raw_text or "").strip()
+    if not text:
+        return False
+    return any(
+        pattern.search(text)
+        for pattern in (
+            _COMPLEX_RESEARCH_CREATE,
+            _COMPLEX_EXTERNAL_ACTION,
+            _COMPLEX_WORKFLOW,
+            _COMPLEX_COMPARISON,
+            _COMPLEX_MULTI_OUTPUT,
+        )
+    )
+
+
+# The three prep lanes. One shared classifier, single decision point — the
+# trivial-reminder bypass and the complexity signals must never be two
+# parallel heuristics that drift apart.
+PREP_LANE_TRIVIAL = "trivial_reminder"
+PREP_LANE_CRON = "obvious_cron"
+PREP_LANE_FULL = "full_agent"
+
+
+@dataclass
+class PrepLane:
+    """Output of ``classify_prep_lane``: lane plus cron payload if any."""
+
+    lane: str
+    schedule: str | None = None
+    schedule_display: str | None = None
+
+
+def classify_prep_lane(raw_text: str) -> PrepLane:
+    """Single deterministic decision point for the prep pipeline.
+
+    Three outputs:
+
+    - ``trivial_reminder`` → skip LLM prep, queue immediately (narrow:
+      bare reminders with an explicit time only).
+    - ``obvious_cron`` → deterministic cron insert (explicit recurrence
+      directive + confidently parseable cadence only).
+    - ``full_agent`` → LLM prep + full agent lane. This is the default
+      and the common path — it covers normal requests ("Check X website
+      on Tuesday") as well as complex multi-step work (research, booking,
+      outreach), which must never be fast-pathed or simplified.
+    """
+    text = (raw_text or "").strip()
+    if not text or len(text) > 200:
+        return PrepLane(PREP_LANE_FULL)
+    # Complexity guard first: research/booking/outreach workflows keep the
+    # full lane no matter what other patterns match.
+    if is_complex_task(text):
+        return PrepLane(PREP_LANE_FULL)
+    if _FAST_PATH_URL.search(text):
+        return PrepLane(PREP_LANE_FULL)
+    if _FAST_PATH_DATE_QUALIFIER.search(text):
+        return PrepLane(PREP_LANE_FULL)
+
+    if has_recurrence_directive(text):
+        # Confident recurring: explicit directive AND a specifically
+        # parseable cadence. Anything fuzzier ("every other weekend") is
+        # ambiguous — let the LLM sort it out.
+        if not _FAST_PATH_CONFIDENT_CADENCE.search(text):
+            return PrepLane(PREP_LANE_FULL)
+        inferred = infer_recurring_schedule(text)
+        if inferred is None:
+            return PrepLane(PREP_LANE_FULL)
+        schedule, display = inferred
+        return PrepLane(
+            PREP_LANE_CRON, schedule=schedule, schedule_display=display
+        )
+
+    if not _BARE_REMINDER.match(text):
+        return PrepLane(PREP_LANE_FULL)
+    if _FAST_PATH_TOOL_HINT.search(text):
+        return PrepLane(PREP_LANE_FULL)
+    if not _EXPLICIT_TIME.search(text):
+        return PrepLane(PREP_LANE_FULL)
+    return PrepLane(PREP_LANE_TRIVIAL)
+
+
+def prep_fast_path(raw_text: str) -> FastPathDecision | None:
+    """Conservative deterministic classifier for skipping LLM prep.
+
+    Thin adapter over ``classify_prep_lane``; ``None`` means "go through
+    normal LLM prep with the full agent lane" and must stay the
+    overwhelmingly common answer.
+    """
+    lane = classify_prep_lane(raw_text)
+    if lane.lane == PREP_LANE_TRIVIAL:
+        return FastPathDecision(kind="task")
+    if lane.lane == PREP_LANE_CRON and lane.schedule:
+        return FastPathDecision(
+            kind="cron",
+            schedule=lane.schedule,
+            schedule_display=lane.schedule_display,
+        )
+    return None
 
 
 def _parse_clock(match: re.Match[str]) -> tuple[int, int, str | None]:

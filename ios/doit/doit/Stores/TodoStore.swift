@@ -472,17 +472,6 @@ final class TodoStore {
         await setStatus(todo.id, next)
     }
 
-    func toggleStarred(_ todo: Todo) async {
-        let next = !todo.is_starred
-        patchTodoLocal(id: todo.id) { $0.is_starred = next }
-        do {
-            try await TodosAPI.setStarred(todo.id, isStarred: next)
-        } catch {
-            print("[store] toggleStarred(\(todo.id)) failed: \(error)")
-            await refreshTodo(id: todo.id)
-        }
-    }
-
     func updateOrganization(_ todo: Todo, topic: TodoTopic?, collectionName: String?) async {
         let normalizedCollection = collectionName?.trimmingCharacters(in: .whitespacesAndNewlines)
         patchTodoLocal(id: todo.id) {

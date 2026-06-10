@@ -20,7 +20,41 @@ The key contracts this module encodes:
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any
+
+
+# Matches the USER's own words asking for spoken audio. Deliberately checks
+# user text (title/detail/original request), never the model's judgment of
+# its own output — weaker models will happily decide a repo listing is a
+# "summary" and call text_to_speech unprompted. Soft triggers (summary,
+# recap, digest, briefing) stay in the predicate so genuine "summarize my
+# inbox" tasks keep producing audio like they do today.
+_SPOKEN_AUDIO_RE = re.compile(
+    r"\b("
+    r"read\s+(?:this|it|that)?\s*(?:aloud|out\s+loud|to\s+me)|"
+    r"voice\s*memo|voice\s*note|spoken|audio|listen|podcast|tts|"
+    r"text[\s-]*to[\s-]*speech|say\s+it\s+out\s+loud|out\s+loud|"
+    r"summary|summarize|summarise|recap|digest|briefing|brief\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def user_wants_spoken_audio(*texts: str | None) -> bool:
+    """True when the user's own words ask for audio or a spoken summary.
+
+    Used twice: to decide whether the TTS instructions are appended to the
+    execution prompt at all, and as the runner-side guard that discards
+    audio the agent generated for a task that never asked for it (e.g.
+    "List the Github repos you have access to" → no audio words → any
+    text_to_speech output is dropped).
+    """
+    for text in texts:
+        if text and _SPOKEN_AUDIO_RE.search(text):
+            return True
+    return False
 
 
 def session_id_for_todo(user_id: str, todo_id: str) -> str:
@@ -67,6 +101,8 @@ def build_prompt(
     connection_slug: str | None = None,
     attachment_urls: list[str] | None = None,
     pinned_memories: list[dict] | None = None,
+    topic: str | None = None,
+    processed_attachment_urls: list[str] | None = None,
 ) -> str:
     """Per-todo task prompt. Memory comes from Hermes' frozen snapshot.
 
@@ -106,10 +142,20 @@ def build_prompt(
         lines += ["", "Expected connection/toolkit:", connection_slug.strip()]
     base = "\n".join(lines)
     base = _append_pinned_memory_block(base, pinned_memories)
-    base = _append_artifacts_instructions(base)
+    task_text = "\n".join(x for x in (original_title, title, detail) if x)
+    base = _append_artifacts_instructions(
+        base,
+        audio_requested=user_wants_spoken_audio(title, detail, original_title),
+        connection_slug=connection_slug,
+        topic=topic,
+        task_text=task_text,
+    )
     base = _append_activity_instructions(base)
     base = _append_approval_instructions(base)
-    return _append_attachments(base, attachment_urls)
+    base = _append_recall_nudge(base, original_title, title, detail)
+    return _append_attachments(
+        base, attachment_urls, processed_urls=processed_attachment_urls
+    )
 
 
 def build_resume_prompt(
@@ -123,6 +169,8 @@ def build_resume_prompt(
     attachment_urls: list[str] | None = None,
     pinned_memories: list[dict] | None = None,
     task_context: dict[str, list[dict]] | None = None,
+    topic: str | None = None,
+    processed_attachment_urls: list[str] | None = None,
 ) -> str:
     """Follow-up prompt with the user's interaction response woven in."""
     base = build_prompt(
@@ -132,6 +180,7 @@ def build_resume_prompt(
         preparation_summary=preparation_summary,
         connection_slug=connection_slug,
         pinned_memories=pinned_memories,
+        topic=topic,
     )
     base = _append_task_context_block(base, task_context)
 
@@ -163,6 +212,16 @@ def build_resume_prompt(
     if freeform:
         lines.append(f"The user also wrote: {freeform}")
     lines.append("")
+    approved_send = (
+        str(interaction.get("kind") or "").lower() in {"approval", "confirmation"}
+        and option_id.lower() in {"send", "yes", "approve", "confirm", "ok", "post"}
+    )
+    if approved_send:
+        lines.append(
+            "The user approved this outbound action on the card. You may now "
+            "call send / calendar-invite / public-post tools to execute it, "
+            "then emit the final artifact(s)."
+        )
     lines.append(
         "Continue from where you left off. If the choice was approving the "
         "previous proposal, execute it now. If the user asked for a rewrite "
@@ -171,10 +230,14 @@ def build_resume_prompt(
         "materially changed."
     )
     composed = f"{base}\n\n" + "\n".join(lines)
-    return _append_attachments(composed, attachment_urls)
+    return _append_attachments(
+        composed, attachment_urls, processed_urls=processed_attachment_urls
+    )
 
 
-_ARTIFACT_INSTRUCTIONS = """\
+# Legacy (pre-compaction) core artifact prose. Restored instantly by
+# setting DOIT_COMPACT_PROMPTS=0 — no deploy needed.
+_ARTIFACT_CORE_LEGACY = """\
 
 Artifacts (user-visible deliverables):
 When this task produces something the user should see at a glance — a
@@ -222,39 +285,58 @@ Rules:
   under the task title).
 - Do not emit artifacts in the same reply as a [[DOIT_INTERACTION]] block;
   re-emit them once the user answers and the task actually finishes.
+"""
 
-Spoken summaries (audio):
-When the user asks for a summary, recap, digest, briefing, or "read this to
-me", and the answer is at least a few sentences long, also call the
-built-in ``text_to_speech`` tool with a concise spoken version of the
-summary. The Doit runner intercepts that tool's output, uploads the
-generated audio file, and surfaces it as an audio player at the top of
-the task detail view with the spoken text shown beneath it.
 
-Guidelines for ``text_to_speech``:
-- Pass only the ``text`` argument; the user picks the provider/voice in
-  their Hermes config (ElevenLabs, OpenAI TTS, Edge TTS, etc.). Do not
-  set ``output_path`` — let the tool pick a path.
-- Use the native tool named exactly ``text_to_speech``. Do not use
-  Composio, browser uploads, storage/file-sharing tools, "audio
-  recording" tools, or generated links for spoken summaries. Those show
-  up as browser links in the app and are the wrong UX.
-- The spoken text should read naturally out loud: drop markdown,
-  bullet syntax, raw URLs, code blocks, and JSON. Use full sentences
-  with light pacing. Keep it under ~400 words for a quick listen unless
-  the user explicitly asked for the whole thing.
-- Call ``text_to_speech`` once per task in your final turn (after any
-  tool work has finished). Do not call it on every turn, and do not
-  emit a separate ``[[DOIT_ARTIFACT]]`` block for the audio — the
-  runner creates the artifact automatically from the tool result.
-- Never emit a ``link`` artifact for audio. If you used
-  ``text_to_speech`` correctly, the runner has the generated local file
-  path and will create the in-app audio player automatically.
-- Skip TTS for short replies (a single sentence, a confirmation,
-  "Done.", a one-line answer) and for tasks where audio adds no value
-  (sending an email, scheduling, writing a draft the user will read).
-- Never put a ``MEDIA:`` tag or the raw file path in your chat reply —
-  the audio player handles delivery.
+# Compact cheat-sheet version of the core artifact contract: short rules +
+# copy-paste examples. Same contract, fewer tokens, and the examples carry
+# the signal weaker models miss in long prose.
+_ARTIFACT_CORE_COMPACT = """\
+
+Artifacts (user-visible deliverables) — contract:
+End your FINAL reply with one [[DOIT_ARTIFACT]] block per deliverable the
+user should see as a card: a created doc/sheet link, a sent email, a
+calendar invite, or a short text result. Each block is standalone valid
+JSON between the markers, never in a code fence.
+
+Examples (copy these shapes exactly):
+
+[[DOIT_ARTIFACT]]
+{"key":"sheet","type":"link","title":"Vendor comparison sheet",
+ "payload":{"url":"https://docs.google.com/spreadsheets/d/...","provider":"googlesheets"}}
+[[/DOIT_ARTIFACT]]
+
+[[DOIT_ARTIFACT]]
+{"key":"email-acme","type":"email","title":"Quote request to Acme",
+ "payload":{"to":["ops@acme.com"],"subject":"Quote request",
+ "body":"Hi — ...","provider":"gmail"}}
+[[/DOIT_ARTIFACT]]
+
+Payload shapes by type:
+- link:     {"url":"https://...","provider":"googlesheets|googledocs|gmail|..."}
+- email:    {"to":["a@b.com"],"subject":"...","body":"...","provider":"gmail"}
+- calendar: {"title":"...","start":"<ISO8601>","end":"<ISO8601>",
+             "location":"...","attendees":["a@b.com"],"url":"https://..."}
+- text:     {"text":"..."}
+- image:    {"url":"https://...","provider":"figma|browser|openai|...",
+             "width":390,"height":844}
+- options:  structured comparison/booking list (details appear when relevant)
+
+Rules:
+- Stable ``key`` per artifact; reuse the SAME key on a later turn to update
+  that card instead of creating a new one.
+- One card per deliverable: primary link first (e.g. key ``sheet``), then
+  one ``email`` artifact per draft with distinct keys (``email-acme``,
+  ``email-beta``, …). Never collapse drafts into one long text block.
+- Only deliverables the user will revisit — no scratch notes, search
+  output, or tool diagnostics.
+- Never emit artifacts in the same reply as a [[DOIT_INTERACTION]] block;
+  re-emit them after the user answers.
+- Use exactly one "Done —" lead-in per final reply.
+"""
+
+
+_IMAGE_INSTRUCTIONS = """\
 
 Visual deliverables (image):
 When the user asks for an image back in Doit — a Figma screen export,
@@ -283,6 +365,10 @@ Guidelines for ``image`` artifacts:
   later turns to update an iteration in place.
 - Do not also emit a duplicate ``link`` artifact for the same image —
   one card per asset is enough.
+"""
+
+
+_OPTIONS_INSTRUCTIONS = """\
 
 Comparison / booking options (``options``):
 When the user should revisit structured choices — flights, hotels, events,
@@ -332,6 +418,10 @@ Category examples (fill ``fields`` appropriately):
   badge = price or time slot.
 - movie: summary ``AMC Metreon, Friday``; fields Theater / Showtime / Rating;
   badge = ticket price; ``image_url`` for poster when available.
+"""
+
+
+_FIGMA_INSTRUCTIONS = """\
 
 Figma workflows:
 - Use available Figma Composio tools for connected-account work today:
@@ -355,15 +445,171 @@ Figma workflows:
 """
 
 
-def _append_artifacts_instructions(base: str) -> str:
+_TTS_INSTRUCTIONS = """\
+
+Spoken summaries (audio):
+When the user asks for a summary, recap, digest, briefing, or "read this to
+me", and the answer is at least a few sentences long, also call the
+built-in ``text_to_speech`` tool with a concise spoken version of the
+summary. The Doit runner intercepts that tool's output, uploads the
+generated audio file, and surfaces it as an audio player at the top of
+the task detail view with the spoken text shown beneath it.
+
+Guidelines for ``text_to_speech``:
+- Pass only the ``text`` argument; the user picks the provider/voice in
+  their Hermes config (ElevenLabs, OpenAI TTS, Edge TTS, etc.). Do not
+  set ``output_path`` — let the tool pick a path.
+- Use the native tool named exactly ``text_to_speech``. Do not use
+  Composio, browser uploads, storage/file-sharing tools, "audio
+  recording" tools, or generated links for spoken summaries. Those show
+  up as browser links in the app and are the wrong UX.
+- The spoken text should read naturally out loud: drop markdown,
+  bullet syntax, raw URLs, code blocks, and JSON. Use full sentences
+  with light pacing. Keep it under ~400 words for a quick listen unless
+  the user explicitly asked for the whole thing.
+- Call ``text_to_speech`` once per task in your final turn (after any
+  tool work has finished). Do not call it on every turn, and do not
+  emit a separate ``[[DOIT_ARTIFACT]]`` block for the audio — the
+  runner creates the artifact automatically from the tool result.
+- Never emit a ``link`` artifact for audio. If you used
+  ``text_to_speech`` correctly, the runner has the generated local file
+  path and will create the in-app audio player automatically.
+- Skip TTS for short replies (a single sentence, a confirmation,
+  "Done.", a one-line answer) and for tasks where audio adds no value
+  (sending an email, scheduling, writing a draft the user will read).
+- Never put a ``MEDIA:`` tag or the raw file path in your chat reply —
+  the audio player handles delivery.
+"""
+
+_TTS_OPT_OUT_LINE = """\
+
+Audio: do NOT call the ``text_to_speech`` tool or produce voice memos /
+audio artifacts for this task — the user did not ask for spoken audio.
+Reply with text only.
+"""
+
+
+def _recall_nudge_enabled() -> bool:
+    """Whether the session_search recall nudge is on (DOIT_RECALL_NUDGE).
+
+    Off by default: premium models usually call session_search on their
+    own when the user says "like last time". The nudge exists for weaker
+    models that skip recall and re-ask or invent placeholders instead.
+    """
+    return os.getenv("DOIT_RECALL_NUDGE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+# Phrases that reference earlier work the agent may have done in a prior
+# session — the cue that session_search (FTS over prior sessions) would
+# recover context the model otherwise re-asks for.
+_RECALL_HINT = re.compile(
+    r"\b(last\s+time|like\s+(?:before|last)|previous(?:ly)?|"
+    r"(?:that|the)\s+(?:draft|doc|document|email|sheet|list|report|summary)\s+"
+    r"(?:from|you)|the\s+other\s+day|as\s+(?:before|usual)|"
+    r"same\s+as\s+(?:before|last)|you\s+(?:did|made|sent|created|drafted|"
+    r"found)\s|do\s+(?:it|that|this)\s+again|once\s+more)\b",
+    re.IGNORECASE,
+)
+
+
+def _append_recall_nudge(base: str, *texts: str | None) -> str:
+    """One-line session_search nudge when the user references prior work.
+
+    Env-gated and purely additive: when the flag is off or no recall
+    phrase matches, the prompt is unchanged.
+    """
+    if not _recall_nudge_enabled():
+        return base
+    blob = " ".join(t for t in texts if t)
+    if not blob or not _RECALL_HINT.search(blob):
+        return base
+    return (
+        f"{base}\n\n"
+        "The user referenced earlier work. Call session_search with the "
+        "relevant keywords to recall it before asking the user or redoing "
+        "the work."
+    )
+
+
+def _compact_prompts_enabled() -> bool:
+    """Whether the compacted cheat-sheet prose is active.
+
+    Single env flag for instant rollback: setting ``DOIT_COMPACT_PROMPTS=0``
+    restores the legacy long-form prose without a deploy. Default on.
+    """
+    value = os.getenv("DOIT_COMPACT_PROMPTS", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+# Task-signal detectors for conditional prompt sections. These key on the
+# task's own metadata and text (connection_slug, topic, user wording) — never
+# on which model is running — so every model gets the same, smaller prompt
+# when a section is irrelevant.
+_FIGMA_HINT = re.compile(r"\bfigma\b", re.IGNORECASE)
+
+_VISUAL_HINT = re.compile(
+    r"\b(image|images|picture|photo|photos|screenshot|screenshots|mockup|"
+    r"mock-up|wireframe|illustration|infographic|chart|graph|diagram|logo|"
+    r"banner|icon|render|visual|design|draw|sketch)\b",
+    re.IGNORECASE,
+)
+
+_COMPARISON_HINT = re.compile(
+    r"\b(flight|flights|hotel|hotels|book|booking|reserve|reservation|"
+    r"restaurant|restaurants|movie|movies|showtime|showtimes|ticket|tickets|"
+    r"rental|airbnb|compare|comparison|options|shortlist|short-list|vet|"
+    r"tee\s*time|haircut|salon|appointment|itinerary|best|solid|"
+    r"vendor|vendors|moving\s+compan)\b",
+    re.IGNORECASE,
+)
+
+_COMPARISON_TOPICS = frozenset({"travel", "shopping"})
+
+
+def _append_artifacts_instructions(
+    base: str,
+    *,
+    audio_requested: bool = True,
+    connection_slug: str | None = None,
+    topic: str | None = None,
+    task_text: str = "",
+) -> str:
     """Teach the agent the artifact marker contract on every execution turn.
 
     Kept on the per-todo prompt (not the system prompt that lives in the
     Hermes profile) so the convention is self-contained in this repo and
     easy to evolve without redeploying profiles. Idempotent because the
     runner builds the prompt fresh each turn.
+
+    Domain-specific sections are appended only when task signals suggest
+    they are relevant — pure removal of irrelevant context that saves
+    tokens for every model:
+
+    - image guidance: visual wording or a Figma task
+    - options guidance: comparison/booking wording or travel/shopping topic
+    - Figma guidance: Figma connection slug or "figma" in the task text
+    - TTS guidance: only when the USER asked for spoken audio; otherwise a
+      one-line opt-out (stops unsolicited ElevenLabs voice memos)
     """
-    return base + _ARTIFACT_INSTRUCTIONS
+    slug = (connection_slug or "").strip().lower()
+    text = task_text or ""
+    is_figma = slug == "figma" or bool(_FIGMA_HINT.search(text))
+
+    out = base
+    out += _ARTIFACT_CORE_COMPACT if _compact_prompts_enabled() else _ARTIFACT_CORE_LEGACY
+    if is_figma or _VISUAL_HINT.search(text):
+        out += _IMAGE_INSTRUCTIONS
+    if (topic or "").strip().lower() in _COMPARISON_TOPICS or _COMPARISON_HINT.search(text):
+        out += _OPTIONS_INSTRUCTIONS
+    if is_figma:
+        out += _FIGMA_INSTRUCTIONS
+    out += _TTS_INSTRUCTIONS if audio_requested else _TTS_OPT_OUT_LINE
+    return out
 
 
 _ACTIVITY_INSTRUCTIONS = """\
@@ -460,7 +706,9 @@ rules:
   In each case, draft the email / invite / message first, then emit
   one `[[DOIT_INTERACTION]]` block of kind `approval` with the draft
   in `content` so iOS can render the draft preview and Send / Edit
-  buttons. Wait for the user's response before sending.
+  buttons. Wait for the user's response before sending. Do NOT call
+  send/email/calendar-create/post tools until after the user taps Send
+  on the approval card — the runner blocks unauthorized sends.
 
 - Approval is NOT required for: creating spreadsheets, docs, drafts,
   or other artifacts the user can review at their leisure;
@@ -471,6 +719,42 @@ rules:
 
 - Once approved, perform the action immediately and emit a final
   artifact (or refreshed artifact set) describing what was sent.
+
+- Never use placeholder emails, names, or body text. Use real data from
+  tools/memory or ask the user.
+"""
+
+
+_APPROVAL_INSTRUCTIONS_COMPACT = """\
+
+Approval policy (draft first, ask second):
+- Create freely in the user's own workspace — spreadsheets, docs, drafts,
+  notes, artifacts. Approval is NOT required for creation, read-only
+  research, or summarisation: just do the work and emit the artifact.
+- ALWAYS draft before asking. Never stop at "Should I send X?" without
+  the actual content — the approval card is meaningless without a draft.
+- Approval IS required (after drafting) before: sending an email, sending
+  or updating a calendar / meeting invite with attendees other than the
+  user, posting publicly, or irreversibly modifying/deleting data. Emit
+  one [[DOIT_INTERACTION]] block of kind "approval" with the draft in
+  content, then STOP and wait. Do NOT call send/email/calendar-create/post
+  tools on this turn — the runner blocks unauthorized sends.
+
+[[DOIT_INTERACTION]]
+{"kind":"approval","prompt":"Send this email to Acme?",
+ "content":{"to":["ops@acme.com"],"subject":"Quote request","body":"Hi — ..."},
+ "options":[{"id":"send","label":"Send","style":"primary"},
+            {"id":"edit","label":"Edit","style":"secondary"},
+            {"id":"cancel","label":"Cancel","style":"destructive"}],
+ "allow_freeform":true}
+[[/DOIT_INTERACTION]]
+
+- Once approved, act immediately and emit the final artifact(s).
+- After the user taps Send on the approval card, you may call send/invite/post
+  tools on the resume turn only.
+- If the user said "review with me" or "ask before <action>", honour it.
+- Never use placeholder emails, names, or body text. Use real data from
+  tools/memory or ask the user.
 """
 
 
@@ -480,8 +764,10 @@ def _append_approval_instructions(base: str) -> str:
     Mirrors `_append_artifacts_instructions` so the convention stays
     self-contained in this repo and can evolve without reshipping the
     Hermes profile. The block is idempotent because the runner rebuilds
-    the prompt each turn.
+    the prompt each turn. Compacted variant behind ``DOIT_COMPACT_PROMPTS``.
     """
+    if _compact_prompts_enabled():
+        return base + _APPROVAL_INSTRUCTIONS_COMPACT
     return base + _APPROVAL_INSTRUCTIONS
 
 
@@ -496,6 +782,8 @@ def build_followup_prompt(
     attachment_urls: list[str] | None = None,
     pinned_memories: list[dict] | None = None,
     task_context: dict[str, list[dict]] | None = None,
+    topic: str | None = None,
+    processed_attachment_urls: list[str] | None = None,
 ) -> str:
     """Resume prompt for plain user chat messages (no interaction card).
 
@@ -511,14 +799,34 @@ def build_followup_prompt(
         preparation_summary=preparation_summary,
         connection_slug=connection_slug,
         pinned_memories=pinned_memories,
+        topic=topic,
     )
     base = _append_task_context_block(base, task_context)
 
     quoted = [m.strip() for m in messages if m and m.strip()]
     if not quoted:
+        if attachment_urls:
+            # Image-only follow-up (e.g. a second receipt sent to the same
+            # task with no text). Without an explicit "something new
+            # arrived" line, weaker models re-do day-1 work or ask what to
+            # do; the framing tells them to apply the task's standing
+            # instructions to the new image(s) only.
+            composed = (
+                f"{base}\n\n"
+                "The user sent new image attachment(s) with no message. "
+                "Apply this task's standing instructions to the newly "
+                "attached image(s); do not redo work already completed."
+            )
+            return _append_attachments(
+                composed,
+                attachment_urls,
+                processed_urls=processed_attachment_urls,
+            )
         # Fall back to the base prompt so we never ship an empty follow-up
         # block that would just confuse the model.
-        return _append_attachments(base, attachment_urls)
+        return _append_attachments(
+            base, attachment_urls, processed_urls=processed_attachment_urls
+        )
 
     lines = ["The user sent a follow-up message about this task:"]
     for msg in quoted:
@@ -532,7 +840,10 @@ def build_followup_prompt(
         "Do not restart from scratch."
     )
     composed = f"{base}\n\n" + "\n".join(lines)
-    return _append_attachments(composed, attachment_urls)
+    composed = _append_recall_nudge(composed, *quoted)
+    return _append_attachments(
+        composed, attachment_urls, processed_urls=processed_attachment_urls
+    )
 
 
 def _append_task_context_block(
@@ -567,6 +878,10 @@ def _append_task_context_block(
         "cannot see prior task outputs.",
     ]
 
+    # Artifacts are the user's durable reality ("the doc", "that sheet") so
+    # they keep the largest cap. Messages and raw steps are trimmed harder —
+    # a wall of old tool steps dilutes the structured-contract instructions,
+    # especially for smaller models on turn 2+.
     if artifacts:
         lines += ["", "Artifacts already created:"]
         for row in artifacts[-20:]:
@@ -574,14 +889,14 @@ def _append_task_context_block(
 
     if messages:
         lines += ["", "Recent user chat messages:"]
-        for row in messages[-20:]:
+        for row in messages[-10:]:
             body = _truncate_one_line(str(row.get("body") or ""), 500)
             if body:
                 lines.append(f"- {body}")
 
     if steps:
         lines += ["", "Recent agent activity / results:"]
-        for row in steps[-30:]:
+        for row in steps[-15:]:
             formatted = _format_step_context(row)
             if formatted:
                 lines.append(formatted)
@@ -640,21 +955,40 @@ def _truncate_one_line(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _append_attachments(base: str, attachment_urls: list[str] | None) -> str:
+def _append_attachments(
+    base: str,
+    attachment_urls: list[str] | None,
+    *,
+    processed_urls: list[str] | None = None,
+) -> str:
     """Append a stable ``Attachments (images):`` block at the end of a prompt.
 
     The block is only emitted when there is at least one URL. The agent's
     system prompt explains that this block is the canonical place to find
     images for the current task, and that it should call ``vision_analyze``
     on these URLs when the task requires looking at them.
+
+    On follow-up turns the runner also passes ``processed_urls`` — images
+    attached before the last completed run. Signed URLs are regenerated
+    every run, so without these labels the model cannot tell yesterday's
+    receipt from today's and may re-process the old one. First runs pass no
+    processed URLs and keep today's flat format byte-identical.
     """
-    if not attachment_urls:
-        return base
-    cleaned = [url.strip() for url in attachment_urls if url and url.strip()]
-    if not cleaned:
+    cleaned = [u.strip() for u in (attachment_urls or []) if u and u.strip()]
+    cleaned_processed = [
+        u.strip() for u in (processed_urls or []) if u and u.strip()
+    ]
+    if not cleaned and not cleaned_processed:
         return base
     block = ["", "", "Attachments (images):"]
-    block += [f"- {url}" for url in cleaned]
+    if cleaned_processed:
+        block.append("Previously processed (do not re-process unless asked):")
+        block += [f"- {url}" for url in cleaned_processed]
+        if cleaned:
+            block.append("Newly attached since the last run:")
+            block += [f"- {url}" for url in cleaned]
+    else:
+        block += [f"- {url}" for url in cleaned]
     block.append(
         "Call vision_analyze on these URLs only if the task requires "
         "looking at them."

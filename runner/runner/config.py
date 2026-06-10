@@ -45,6 +45,7 @@ class Config:
     apns_use_sandbox: bool
     poll_interval_secs: float
     run_timeout_secs: float
+    stall_timeout_secs: float
 
 
 def load() -> Config:
@@ -75,4 +76,8 @@ def load() -> Config:
         apns_use_sandbox=_bool("APNS_USE_SANDBOX", default=True),
         poll_interval_secs=float(os.environ.get("POLL_INTERVAL_SECS", "2")),
         run_timeout_secs=float(os.environ.get("RUN_TIMEOUT_SECS", "900")),
+        # Progress watchdog: how long without any SSE progress (tool events,
+        # thoughts, text) before the live activity flips to "stalled" so the
+        # user isn't staring at a frozen card.
+        stall_timeout_secs=float(os.environ.get("STALL_TIMEOUT_SECS", "120")),
     )

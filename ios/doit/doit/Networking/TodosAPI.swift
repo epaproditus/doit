@@ -52,15 +52,6 @@ enum TodosAPI {
             .execute()
     }
 
-    static func setStarred(_ id: UUID, isStarred: Bool) async throws {
-        struct Patch: Encodable { let is_starred: Bool }
-        _ = try await Supa.client
-            .from("todos")
-            .update(Patch(is_starred: isStarred))
-            .eq("id", value: id)
-            .execute()
-    }
-
     static func updateOrganization(
         _ id: UUID,
         topic: TodoTopic?,

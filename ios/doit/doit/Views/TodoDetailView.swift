@@ -111,10 +111,6 @@ struct TodoDetailView: View {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 dismiss()
                             },
-                            onToggleStar: {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                Task { await store.toggleStarred(current) }
-                            },
                             onDelete: deleteTask,
                             onTapActivity: openChat
                         )

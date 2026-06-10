@@ -297,6 +297,30 @@ class DB:
             log.error("list_todo_attachments(%s) failed: %s", todo_id, e)
             return []
 
+    def get_last_terminal_step_ts(self, todo_id: str) -> str | None:
+        """Timestamp of the most recent final/error step for a todo.
+
+        ``None`` on first runs (no terminal step yet). Used to split the
+        Attachments prompt block into previously-processed vs newly-attached
+        images on follow-up turns.
+        """
+        try:
+            resp = (
+                self._client.table("todo_steps")
+                .select("ts")
+                .eq("todo_id", todo_id)
+                .in_("kind", ["final", "error"])
+                .order("ts", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = resp.data or []
+            ts = rows[0].get("ts") if rows else None
+            return str(ts) if ts else None
+        except Exception as e:
+            log.error("get_last_terminal_step_ts(%s) failed: %s", todo_id, e)
+            return None
+
     def sign_attachment_url(
         self,
         storage_path: str,

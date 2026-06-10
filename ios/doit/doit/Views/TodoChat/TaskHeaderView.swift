@@ -40,7 +40,6 @@ struct TaskHeaderView: View {
     /// Sourced from `TodoStore.agentActivityByTodoID`.
     let agentActivity: AgentActivity?
     let onBack: () -> Void
-    let onToggleStar: () -> Void
     let onDelete: () -> Void
     /// Opens the chat panel — wired from the detail view when the user taps
     /// the live activity card stack under the title.
@@ -59,7 +58,6 @@ struct TaskHeaderView: View {
         agentStatus: String? = nil,
         agentActivity: AgentActivity? = nil,
         onBack: @escaping () -> Void,
-        onToggleStar: @escaping () -> Void = {},
         onDelete: @escaping () -> Void,
         onTapActivity: @escaping () -> Void = {}
     ) {
@@ -68,7 +66,6 @@ struct TaskHeaderView: View {
         self.agentStatus = agentStatus
         self.agentActivity = agentActivity
         self.onBack = onBack
-        self.onToggleStar = onToggleStar
         self.onDelete = onDelete
         self.onTapActivity = onTapActivity
     }
@@ -116,7 +113,7 @@ struct TaskHeaderView: View {
                     .truncationMode(.tail)
                     .accessibilityLabel("Created \(humanizedDate(todo.created_at))")
 
-                if !connectionSlugs.isEmpty || todo.is_starred {
+                if !connectionSlugs.isEmpty {
                     headerMetadataDot
                     connectionLogosRow
                 }
@@ -125,12 +122,6 @@ struct TaskHeaderView: View {
             Spacer(minLength: 0)
 
             Menu {
-                Button(action: onToggleStar) {
-                    Label(
-                        todo.is_starred ? "Unstar Task" : "Star Task",
-                        systemImage: todo.is_starred ? "star.slash" : "star"
-                    )
-                }
                 Button("Delete Task", role: .destructive, action: onDelete)
             } label: {
                 Image(systemName: "ellipsis")
@@ -160,8 +151,7 @@ struct TaskHeaderView: View {
         ConnectionLogosRow(
             slugs: connectionSlugs,
             iconSize: TaskHeaderLayout.headerConnectionIconSize,
-            spacing: 5,
-            showsStar: todo.is_starred
+            spacing: 5
         )
     }
 

@@ -379,6 +379,28 @@ class AgentActivityService:
             snap.completed_at = now
         return snap
 
+    def stalled(self, latest: ActivitySnapshot | None = None) -> ActivitySnapshot:
+        """Snapshot for a run with no SSE progress past the stall timeout.
+
+        Distinct ``phase="stalled"`` (state stays ``running``) so iOS can show
+        "Still working — this is taking longer than usual" copy instead of the
+        generic shimmer. Keeps the last known tool context so the card still
+        says *what* it's stuck on.
+        """
+        detail = "This is taking longer than usual…"
+        if latest is not None and latest.title and latest.title != "Still working":
+            detail = f"Still on: {latest.title}"
+        return ActivitySnapshot(
+            phase="stalled",
+            state="running",
+            title="Still working — checking results…",
+            detail=detail,
+            tool_name=latest.tool_name if latest else None,
+            tool_category=(latest.tool_category if latest else None) or "thinking",
+            started_at=self._started_at,
+            recent=list(self._recent),
+        )
+
     def heartbeat(self, latest: ActivitySnapshot | None = None) -> ActivitySnapshot:
         """Refresh the live row during long gaps between Hermes events.
 

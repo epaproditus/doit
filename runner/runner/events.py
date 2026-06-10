@@ -542,7 +542,50 @@ def parse_interaction(text: str) -> InteractionRequest | None:
     elif options is not None:
         payload.pop("options", None)
 
+    raw_kind, payload = _synthesize_default_options(raw_kind, payload)
+
     return InteractionRequest(kind=raw_kind, prompt=prompt[:500], payload=payload)
+
+
+def _synthesize_default_options(
+    kind: str, payload: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Fill in standard buttons when the model omits ``options``.
+
+    Smaller models frequently emit a structurally valid interaction block
+    but forget the options array, which renders as a freeform-only question
+    on iOS instead of tappable buttons. The expected button sets for
+    approval/confirmation asks are fixed, so the runner synthesizes them.
+    Models that already emit options (premium ones do) are untouched.
+    """
+    if payload.get("options"):
+        return kind, payload
+    if kind == "approval":
+        payload = dict(payload)
+        payload["options"] = [
+            {"id": "send", "label": "Send", "style": "primary"},
+            {"id": "edit", "label": "Edit", "style": "secondary"},
+            {"id": "cancel", "label": "Cancel", "style": "destructive"},
+        ]
+        log.info("interaction guard: synthesized default approval options")
+        return kind, payload
+    if kind == "confirmation":
+        payload = dict(payload)
+        payload["options"] = [
+            {"id": "yes", "label": "Yes", "style": "primary"},
+            {"id": "no", "label": "No", "style": "secondary"},
+        ]
+        log.info("interaction guard: synthesized default confirmation options")
+        return kind, payload
+    if kind == "choice":
+        # A choice with no options can't render buttons; degrade to a
+        # freeform question instead of an empty picker.
+        payload = dict(payload)
+        payload.pop("options", None)
+        payload["allow_freeform"] = True
+        log.info("interaction guard: choice without options -> freeform question")
+        return "question", payload
+    return kind, payload
 
 
 def parse_activity(text: str) -> str | None:
@@ -869,6 +912,131 @@ def merge_terminal_translated(
         spawned_tasks=spawned_tasks,
         usage_total=max(prior.usage_total, new.usage_total),
     )
+
+
+# Placeholder patterns that mark fake content in drafts: invented emails,
+# lorem ipsum, template brackets, generic stand-in names. Soft patterns are
+# case-insensitive; TODO/TBD/XXX must be uppercase to avoid flagging normal
+# prose (this app is literally about "todos").
+_PLACEHOLDER_SOFT = re.compile(
+    r"(example\.com|@example\.|test@test|\[placeholder\]|lorem\s+ipsum|"
+    r"your\s+name\s+here|john\s+doe|jane\s+doe|user@domain\.|someone@example|"
+    r"\[insert[^\]]*\]|<insert[^>]*>|\[your[^\]]*\]|\{\{[^}]*\}\}|"
+    r"123-?456-?7890)",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_HARD = re.compile(r"\b(TODO|TBD|XXX+)\b")
+
+
+def looks_like_placeholder(text: str) -> bool:
+    """True when text contains obvious placeholder/fake content."""
+    if not text:
+        return False
+    return bool(_PLACEHOLDER_SOFT.search(text) or _PLACEHOLDER_HARD.search(text))
+
+
+def find_placeholder_matches(value: Any) -> list[str]:
+    """Collect placeholder snippets from a payload (dict/list/str), deduped.
+
+    Used by the runner's placeholder gate to inspect email/calendar artifact
+    payloads and approval draft content before letting a task complete.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, str):
+            for pattern in (_PLACEHOLDER_SOFT, _PLACEHOLDER_HARD):
+                for match in pattern.finditer(node):
+                    snippet = match.group(0)
+                    key = snippet.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(snippet)
+        elif isinstance(node, dict):
+            for child in node.values():
+                _walk(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                _walk(child)
+
+    _walk(value)
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Outbound send approval gate
+# ---------------------------------------------------------------------------
+#
+# Smaller models ignore prompt-only "ask before sending" rules and call
+# GMAIL_SEND / calendar-create tools directly. The runner enforces: send
+# tools may only run on a resume turn where the user tapped Send/Yes on an
+# approval card.
+
+_OUTBOUND_SEND_EXCLUDE = re.compile(
+    r"(?:draft|create_draft|save_draft|list_|fetch_|get_|search_|read_|find_)",
+    re.IGNORECASE,
+)
+
+_OUTBOUND_SEND_TOOL = re.compile(
+    r"(?:"
+    r"gmail.*send|send.*(?:email|mail)|mail.*send|"
+    r"googlecalendar.*(?:create|update|insert|patch)|"
+    r"calendar.*(?:create|update|insert|patch)|"
+    r"slack.*(?:send|post)|"
+    r"(?:post|send).*(?:tweet|twitter|linkedin)|"
+    r"outlook.*send|"
+    r"microsoft.*send.*mail"
+    r")",
+    re.IGNORECASE,
+)
+
+_APPROVED_OUTBOUND_OPTION_IDS = frozenset(
+    {"send", "yes", "approve", "confirm", "ok", "post"}
+)
+
+
+def is_outbound_send_tool(tool_name: str | None) -> bool:
+    """True for tools that send email, post publicly, or create/update invites."""
+    if not tool_name:
+        return False
+    name = tool_name.strip()
+    if _OUTBOUND_SEND_EXCLUDE.search(name):
+        return False
+    return bool(_OUTBOUND_SEND_TOOL.search(name))
+
+
+def outbound_send_approved_from_resume(resume: dict | None) -> bool:
+    """True when resuming after the user approved an outbound send on the card."""
+    if resume is None:
+        return False
+    kind = str(resume.get("kind") or "").strip().lower()
+    if kind not in {"approval", "confirmation"}:
+        return False
+    option_id = str((resume.get("response") or {}).get("option_id") or "").lower()
+    return option_id in _APPROVED_OUTBOUND_OPTION_IDS
+
+
+def build_blocked_send_approval_payload(
+    *,
+    draft_hint: str | None = None,
+    prior_content: Any = None,
+) -> dict[str, Any]:
+    """Payload for a runner-synthesized approval when send was blocked."""
+    payload: dict[str, Any] = {
+        "options": [
+            {"id": "send", "label": "Send", "style": "primary"},
+            {"id": "edit", "label": "Edit", "style": "secondary"},
+            {"id": "cancel", "label": "Cancel", "style": "destructive"},
+        ],
+        "allow_freeform": True,
+        "blocked_unauthorized_send": True,
+    }
+    if prior_content is not None:
+        payload["content"] = prior_content
+    elif draft_hint and draft_hint.strip():
+        payload["content"] = draft_hint.strip()[:4000]
+    return payload
 
 
 def _clean_option(option: Any) -> dict[str, Any] | None:

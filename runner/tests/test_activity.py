@@ -339,5 +339,35 @@ class AgentActivityServiceTests(unittest.TestCase):
         self.assertLessEqual(len(fields["title"]), 200)
 
 
+class StalledSnapshotTests(unittest.TestCase):
+    """Phase 3a/3c: distinct stalled phase when a run stops emitting events."""
+
+    def test_stalled_without_context_uses_generic_copy(self) -> None:
+        svc = AgentActivityService()
+        snap = svc.stalled(None)
+        self.assertEqual(snap.phase, "stalled")
+        # The run is not over — state must stay running so iOS keeps the
+        # live surfaces alive instead of showing a terminal card.
+        self.assertEqual(snap.state, "running")
+        self.assertIn("Still working", snap.title)
+        self.assertIsNone(snap.completed_at)
+
+    def test_stalled_keeps_last_known_tool_context(self) -> None:
+        svc = AgentActivityService()
+        latest = svc.observe(_started("GMAIL_SEARCH_EMAILS"))
+        assert latest is not None
+        snap = svc.stalled(latest)
+        self.assertEqual(snap.phase, "stalled")
+        self.assertEqual(snap.tool_name, "GMAIL_SEARCH_EMAILS")
+        assert snap.detail is not None
+        self.assertIn("Still on:", snap.detail)
+
+    def test_stalled_differs_from_heartbeat_phase(self) -> None:
+        svc = AgentActivityService()
+        heartbeat = svc.heartbeat(None)
+        stalled = svc.stalled(None)
+        self.assertNotEqual(heartbeat.phase, stalled.phase)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -206,6 +206,72 @@ class TTSCallTranslationTests(unittest.TestCase):
         self.assertEqual(effect.step_kind, "tool_result")
 
 
+class UserWantsSpokenAudioTests(unittest.TestCase):
+    """The opt-in predicate checks the USER's text, not the model's output."""
+
+    def test_plain_list_task_is_not_audio(self) -> None:
+        from runner.prompt import user_wants_spoken_audio
+
+        # The reported bug: this prompt produced an ElevenLabs voice memo.
+        self.assertFalse(
+            user_wants_spoken_audio("List the Github repos you have access to.")
+        )
+        self.assertFalse(user_wants_spoken_audio("Send an email to John"))
+        self.assertFalse(user_wants_spoken_audio("Create a Google Doc for bugs"))
+        self.assertFalse(user_wants_spoken_audio("", None))
+
+    def test_explicit_audio_phrases_opt_in(self) -> None:
+        from runner.prompt import user_wants_spoken_audio
+
+        self.assertTrue(user_wants_spoken_audio("Read this to me"))
+        self.assertTrue(user_wants_spoken_audio("Make me a voice memo of the news"))
+        self.assertTrue(user_wants_spoken_audio("I want to listen to it"))
+        self.assertTrue(user_wants_spoken_audio("Give me an audio version"))
+
+    def test_soft_summary_triggers_still_opt_in(self) -> None:
+        # Preserves today's premium-model UX: "summarize my inbox" keeps
+        # producing audio because the user's text says summary.
+        from runner.prompt import user_wants_spoken_audio
+
+        self.assertTrue(user_wants_spoken_audio("Give me a spoken summary of my inbox"))
+        self.assertTrue(user_wants_spoken_audio("Summarize my unread emails"))
+        self.assertTrue(user_wants_spoken_audio("Morning briefing of my calendar"))
+        self.assertTrue(user_wants_spoken_audio("Weekly recap of Slack threads"))
+
+    def test_checks_any_of_the_supplied_texts(self) -> None:
+        from runner.prompt import user_wants_spoken_audio
+
+        self.assertTrue(
+            user_wants_spoken_audio("Check my email", "and read it aloud please")
+        )
+
+
+class ConditionalTTSPromptTests(unittest.TestCase):
+    """TTS instructions appear only when the user asked for audio."""
+
+    def test_audio_task_includes_tts_instructions(self) -> None:
+        from runner.prompt import build_prompt
+
+        prompt = build_prompt(
+            "Spoken summary of my inbox",
+            "",
+            original_title="Give me a spoken summary of my inbox",
+        )
+        self.assertIn("text_to_speech", prompt)
+        self.assertIn("Spoken summaries (audio):", prompt)
+
+    def test_list_task_gets_opt_out_line_instead(self) -> None:
+        from runner.prompt import build_prompt
+
+        prompt = build_prompt(
+            "List Github repos",
+            "",
+            original_title="List the Github repos you have access to.",
+        )
+        self.assertNotIn("Spoken summaries (audio):", prompt)
+        self.assertIn("do NOT call the ``text_to_speech`` tool", prompt)
+
+
 class ArtifactKindIncludesAudioTests(unittest.TestCase):
     """The artifact allow-list and parser also let `audio` blocks land."""
 

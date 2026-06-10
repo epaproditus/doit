@@ -17,6 +17,10 @@ from runner.events import (
     INTERACTION_CLOSE,
     INTERACTION_OPEN,
     extract_usage_total,
+    find_placeholder_matches,
+    is_outbound_send_tool,
+    looks_like_placeholder,
+    outbound_send_approved_from_resume,
     parse_activity,
     parse_interaction,
     parse_public_reasoning,
@@ -96,6 +100,158 @@ class ParseInteractionTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.prompt, "Send the thing?")
+
+
+class OutboundSendGateTests(unittest.TestCase):
+    def test_send_email_tools_are_outbound(self) -> None:
+        self.assertTrue(is_outbound_send_tool("GMAIL_SEND_EMAIL"))
+        self.assertTrue(is_outbound_send_tool("gmail_send_message"))
+
+    def test_draft_tools_are_not_outbound(self) -> None:
+        self.assertFalse(is_outbound_send_tool("GMAIL_CREATE_DRAFT"))
+        self.assertFalse(is_outbound_send_tool("GMAIL_FETCH_EMAILS"))
+
+    def test_calendar_create_is_outbound(self) -> None:
+        self.assertTrue(is_outbound_send_tool("GOOGLECALENDAR_CREATE_EVENT"))
+
+    def test_approved_resume_detection(self) -> None:
+        self.assertTrue(
+            outbound_send_approved_from_resume(
+                {
+                    "kind": "approval",
+                    "response": {"option_id": "send"},
+                }
+            )
+        )
+        self.assertFalse(
+            outbound_send_approved_from_resume(
+                {
+                    "kind": "approval",
+                    "response": {"option_id": "edit"},
+                }
+            )
+        )
+        self.assertFalse(outbound_send_approved_from_resume(None))
+
+
+class PlaceholderDetectorTests(unittest.TestCase):
+    """Phase 4a: catch fake content in drafts before it ships."""
+
+    def test_flags_common_placeholder_patterns(self) -> None:
+        for text in (
+            "Send to john@example.com",
+            "Reach me at test@test.com",
+            "[placeholder] for the agenda",
+            "Lorem ipsum dolor sit amet",
+            "Dear John Doe,",
+            "Your Name Here",
+            "Call 123-456-7890",
+            "Hi [insert name],",
+            "Hello {{first_name}}",
+            "Subject: TODO write this",
+            "Budget: TBD",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(looks_like_placeholder(text))
+
+    def test_normal_content_passes(self) -> None:
+        for text in (
+            "Hi Sam, following up on our call Tuesday.",
+            "Send to sam@acme-corp.io",
+            "Your tasks and todos are listed below.",  # lowercase "todo" ok
+            "",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(looks_like_placeholder(text))
+
+    def test_lowercase_todo_is_not_flagged(self) -> None:
+        # The product is literally about todos; only uppercase TODO/TBD
+        # markers count as placeholders.
+        self.assertFalse(looks_like_placeholder("added it to your todo list"))
+        self.assertTrue(looks_like_placeholder("TODO: fill in"))
+
+    def test_find_matches_walks_nested_payloads(self) -> None:
+        payload = {
+            "to": "john@example.com",
+            "subject": "Intro",
+            "body": "Hi Jane Doe, lorem ipsum.",
+            "cc": ["real.person@acme-corp.io"],
+            "meta": {"note": "looks fine"},
+        }
+        matches = find_placeholder_matches(payload)
+        lowered = [m.lower() for m in matches]
+        self.assertTrue(any("example." in m for m in lowered))
+        self.assertTrue(any("jane doe" in m for m in lowered))
+        self.assertTrue(any("lorem" in m for m in lowered))
+
+    def test_find_matches_dedupes_and_handles_clean_payloads(self) -> None:
+        payload = {"a": "john@example.com", "b": "another john@example.com"}
+        matches = find_placeholder_matches(payload)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(find_placeholder_matches({"to": "sam@acme-corp.io"}), [])
+        self.assertEqual(find_placeholder_matches(None), [])
+
+
+class OptionSynthesisTests(unittest.TestCase):
+    """Runner-side default buttons when a model omits the options array."""
+
+    def test_approval_without_options_gets_default_buttons(self) -> None:
+        text = wrap('{"kind":"approval","prompt":"Send this email?"}')
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.kind, "approval")
+        self.assertEqual(
+            [(o["id"], o["style"]) for o in result.payload["options"]],
+            [("send", "primary"), ("edit", "secondary"), ("cancel", "destructive")],
+        )
+
+    def test_confirmation_without_options_gets_yes_no(self) -> None:
+        text = wrap('{"kind":"confirmation","prompt":"Delete the event?"}')
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.kind, "confirmation")
+        self.assertEqual(
+            [(o["id"], o["style"]) for o in result.payload["options"]],
+            [("yes", "primary"), ("no", "secondary")],
+        )
+
+    def test_choice_without_options_degrades_to_freeform_question(self) -> None:
+        text = wrap('{"kind":"choice","prompt":"Which one?"}')
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.kind, "question")
+        self.assertNotIn("options", result.payload)
+        self.assertTrue(result.payload["allow_freeform"])
+
+    def test_choice_with_all_invalid_options_degrades_to_freeform(self) -> None:
+        # Options present but all dropped during cleaning — same as missing.
+        text = wrap(
+            '{"kind":"choice","prompt":"Pick one",'
+            '"options":[{"label":"no id"},{"label":"also no id"}]}'
+        )
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.kind, "question")
+        self.assertNotIn("options", result.payload)
+        self.assertTrue(result.payload["allow_freeform"])
+
+    def test_existing_options_are_never_replaced(self) -> None:
+        text = wrap(
+            '{"kind":"approval","prompt":"Send?",'
+            '"options":[{"id":"go","label":"Go","style":"primary"}]}'
+        )
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.payload["options"], [
+            {"id": "go", "label": "Go", "style": "primary"},
+        ])
+
+    def test_question_without_options_is_untouched(self) -> None:
+        text = wrap('{"kind":"question","prompt":"What city?"}')
+        result = parse_interaction(text)
+        assert result is not None
+        self.assertEqual(result.kind, "question")
+        self.assertNotIn("options", result.payload)
 
 
 class PublicActivityTests(unittest.TestCase):
