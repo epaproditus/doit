@@ -166,6 +166,10 @@ struct TodoListView: View {
                 .onChange(of: cronHandoffSignature) { _, _ in
                     reconcilePendingCronHandoff()
                 }
+                .onChange(of: suggestionsRefreshSignature) { _, _ in
+                    guard suggestionsHasLoaded else { return }
+                    Task { await refreshSuggestions() }
+                }
                 .onChange(of: push.pendingTodoID) { _, newID in
                     guard let id = newID else { return }
                     // Push tap → open that todo. Refresh its row first so the
@@ -343,7 +347,10 @@ struct TodoListView: View {
                 .padding(.bottom, 96)
                 .animation(.smooth(duration: 0.34), value: taskLayoutSignature)
             }
-            .refreshable { await store.loadAll() }
+            .refreshable {
+                await store.loadAll()
+                await refreshSuggestions()
+            }
             .task {
                 await loadInitialSuggestionsIfNeeded()
             }
@@ -541,9 +548,8 @@ struct TodoListView: View {
     private var passbookMemories: [AgentMemory] {
         store.memories
             .filter { $0.effectiveTarget == .user }
-            .filter { $0.effectiveMemoryStatus == .proposed || $0.effectiveMemoryStatus == .active }
-            .prefix(6)
-            .map { $0 }
+            .filter { $0.effectiveMemoryStatus == .active || $0.effectiveMemoryStatus == .proposed }
+            .sorted { $0.updated_at > $1.updated_at }
     }
 
     private var scheduledSectionPage: some View {
@@ -842,19 +848,9 @@ struct TodoListView: View {
                 onSave: {
                     Task { await savePassbookMemory(memory) }
                 },
-                onApprove: {
-                    Task {
-                        await store.approveMemory(memory)
-                        dismissMemoryDetail()
-                    }
-                },
                 onForget: {
                     Task {
-                        if memory.isSuggestedMemory {
-                            await store.rejectMemory(memory)
-                        } else {
-                            await store.forgetMemory(memory)
-                        }
+                        await store.forgetMemory(memory)
                         dismissMemoryDetail()
                     }
                 }
@@ -1033,6 +1029,12 @@ struct TodoListView: View {
         ].joined(separator: "|")
     }
 
+    private var suggestionsRefreshSignature: String {
+        let completed = store.todos.filter { $0.status == .done }
+        let latest = completed.max(by: { $0.updated_at < $1.updated_at })?.updated_at.ISO8601Format() ?? ""
+        return "\(completed.count)|\(latest)"
+    }
+
     private var displayedSuggestedTasks: [SuggestedTask] {
         if suggestedTasks.isEmpty && !suggestionsLoading && suggestionsHasLoaded {
             return fallbackSuggestedTasks()
@@ -1044,56 +1046,43 @@ struct TodoListView: View {
     }
 
     private func fallbackSuggestedTasks() -> [SuggestedTask] {
-        let source = store.todos
-            .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .sorted { lhs, rhs in
-                let lhsDoneRank = lhs.status == .done ? 0 : 1
-                let rhsDoneRank = rhs.status == .done ? 0 : 1
-                if lhsDoneRank != rhsDoneRank {
-                    return lhsDoneRank < rhsDoneRank
-                }
-                return lhs.updated_at > rhs.updated_at
-            }
+        guard store.todos.isEmpty else { return [] }
+
+        let genericStarters: [(title: String, theme: String, connectionSlug: String?)] = [
+            ("Draft a reply to an email I have been putting off", "Email", "gmail"),
+            ("Plan my week around the most important tasks", "Plan", "googlecalendar"),
+            ("Research options for a decision I need to make", "Research", nil),
+            ("Create a reminder for something I keep forgetting", "Remind", nil),
+            ("Turn messy notes into a clear action plan", "Write", "googledocs"),
+            ("Find and summarize a document from my workspace", "Docs", "googledrive"),
+            ("Prepare a short status update I can send", "Update", "slack"),
+            ("Organize follow-ups from recent conversations", "Follow-up", "gmail"),
+        ]
 
         var seenTitles: Set<String> = []
-        return source.compactMap { todo in
-            let title = suggestionTitle(for: todo)
-            let key = title.lowercased()
-            guard seenTitles.insert(key).inserted else { return nil }
-            return SuggestedTask(
-                id: "fallback-\(key)",
-                title: title,
-                theme: fallbackTheme(for: todo),
-                kind: .suggestion
+        var results: [SuggestedTask] = []
+
+        for starter in genericStarters {
+            guard results.count < 5 else { break }
+            let key = starter.title.lowercased()
+            guard seenTitles.insert(key).inserted else { continue }
+            results.append(
+                SuggestedTask(
+                    id: "fallback-\(key)",
+                    title: starter.title,
+                    theme: starter.theme,
+                    connectionSlug: starter.connectionSlug,
+                    kind: .suggestion
+                )
             )
         }
-        .prefix(5)
-        .map { $0 }
-    }
 
-    private func suggestionTitle(for todo: Todo) -> String {
-        let rawTitle = todo.original_title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? todo.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawTitle.isEmpty else { return "Create a new task" }
-        return rawTitle
-    }
-
-    private func fallbackTheme(for todo: Todo) -> String {
-        switch todo.connection_slug {
-        case "gmail": return "Email"
-        case "googlecalendar": return "Plan"
-        case "googlesheets": return "Sheets"
-        case "slack": return "Update"
-        case "googledocs": return "Write"
-        case "googledrive": return "Docs"
-        default:
-            return todo.status == .done ? "Follow-up" : "Idea"
-        }
+        return results
     }
 
     private func selectSuggestion(_ suggestion: SuggestedTask) {
         guard suggestion.kind == .suggestion else { return }
-        openSuggestedTask(suggestion.title)
+        openSuggestedTask(suggestion)
     }
 
     private func openAddSheet(title: String = "", action: AddTodoLaunchAction = .note) {
@@ -1103,8 +1092,8 @@ struct TodoListView: View {
         showAddSheet = true
     }
 
-    private func openSuggestedTask(_ title: String) {
-        openAddSheet(title: title)
+    private func openSuggestedTask(_ suggestion: SuggestedTask) {
+        openAddSheet(title: suggestion.title)
     }
 
     private var locationActions: [ExploreActionItem] {
@@ -1310,6 +1299,14 @@ struct TodoListView: View {
         await loadMoreSuggestions()
     }
 
+    private func refreshSuggestions() async {
+        suggestedTasks = []
+        suggestionsHasLoaded = false
+        suggestionsError = nil
+        centeredSuggestedTaskID = nil
+        await loadMoreSuggestions()
+    }
+
     private func triggerLoadMoreSuggestions() {
         Task { await loadMoreSuggestions() }
     }
@@ -1324,10 +1321,18 @@ struct TodoListView: View {
         }
 
         do {
-            let response = try await SuggestionsAPI.fetch(
+            var response = try await SuggestionsAPI.fetch(
                 count: 5,
                 excludeTitles: suggestedTasks.map(\.title)
             )
+            if response.degraded == true,
+               suggestedTasks.isEmpty,
+               response.suggestions.isEmpty {
+                response = try await SuggestionsAPI.fetch(
+                    count: 5,
+                    excludeTitles: suggestedTasks.map(\.title)
+                )
+            }
             let newSuggestions = response.suggestions
                 .map(makeSuggestedTask(from:))
                 .filter { candidate in
@@ -1350,10 +1355,13 @@ struct TodoListView: View {
     private func makeSuggestedTask(from generated: GeneratedSuggestion) -> SuggestedTask {
         let title = generated.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let theme = generated.theme.trimmingCharacters(in: .whitespacesAndNewlines)
+        let connectionSlug = generated.connection_slug?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return SuggestedTask(
             id: "generated-\(UUID().uuidString)",
             title: title.isEmpty ? "Create a helpful new task" : title,
             theme: theme.isEmpty ? "Idea" : theme,
+            connectionSlug: connectionSlug?.isEmpty == false ? connectionSlug : nil,
             kind: .suggestion
         )
     }
@@ -1489,9 +1497,9 @@ private struct CaptureToolbelt: View {
             toolbeltButton(
                 icon: "mic.fill",
                 label: "Record voice note",
-                foreground: .white,
-                background: Color.black,
-                showsBorder: false,
+                foreground: .primary,
+                background: Color.white,
+                showsBorder: true,
                 action: onMic
             )
             toolbeltButton(
@@ -1646,6 +1654,7 @@ private struct SuggestedTask: Identifiable, Hashable {
     let id: String
     let title: String
     let theme: String
+    let connectionSlug: String?
     let kind: Kind
 
     static var loader: SuggestedTask {
@@ -1653,6 +1662,7 @@ private struct SuggestedTask: Identifiable, Hashable {
             id: loaderID,
             title: "",
             theme: "",
+            connectionSlug: nil,
             kind: .loader
         )
     }
@@ -2457,7 +2467,7 @@ private struct PassbookMemoryEmptyCard: View {
                 .background(TodoCardStyle.primaryBlueTint, in: Circle())
             Text("Doit has not learned anything durable yet.")
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
-            Text("After conversations, useful preferences and facts will appear here for review.")
+            Text("After conversations, useful preferences and facts will appear here.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -2508,7 +2518,6 @@ private struct PassbookMemoryDetailCard: View {
     let onClose: () -> Void
     let onEdit: () -> Void
     let onSave: () -> Void
-    let onApprove: () -> Void
     let onForget: () -> Void
 
     var body: some View {
@@ -2517,7 +2526,7 @@ private struct PassbookMemoryDetailCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Memory")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
-                    Text(memory.isSuggestedMemory ? "Suggested by Doit" : "Remembered by Doit")
+                    Text("Remembered by Doit")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -2587,10 +2596,6 @@ private struct PassbookMemoryDetailCard: View {
                             draftBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         )
                 } else {
-                    if memory.isSuggestedMemory {
-                        Button("Use This", action: onApprove)
-                            .buttonStyle(.borderedProminent)
-                    }
                     Button(action: onForget) {
                         Text("Forget")
                             .font(.system(size: 15, weight: .semibold, design: .rounded))

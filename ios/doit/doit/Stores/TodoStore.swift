@@ -851,7 +851,11 @@ final class TodoStore {
         _ realtime: AgentActivity,
         existing: AgentActivity?
     ) -> AgentActivity {
-        guard realtime.payload == nil, let existing else { return realtime }
+        // Full realtime rows (including `payload.steps`) are authoritative.
+        if !realtime.recentSteps.isEmpty {
+            return realtime
+        }
+        guard let existing else { return realtime }
         let sameRun = realtime.hermes_run_id == existing.hermes_run_id
         let isFreshRunStart = realtime.phase == AgentActivityPhase.starting.rawValue
         let resumedFromPaused = existing.resolvedState == .paused && realtime.isRunning

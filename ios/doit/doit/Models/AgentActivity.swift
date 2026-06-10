@@ -152,6 +152,26 @@ struct AgentActivity: Codable, Identifiable, Hashable, Sendable {
         }
         return steps.compactMap(AgentActivityStep.init(json:))
     }
+
+    /// Penultimate steps for the stacked "previous intent" cards. The
+    /// current intent always comes from this snapshot's top-level
+    /// `title` / `detail` fields — same rule as `AgentLiveActivityManager`
+    /// and the Lock Screen widget's `previousIntents` array.
+    var stackPreviousSteps: [AgentActivityStep] {
+        let steps = recentSteps
+        guard steps.count > 1 else { return [] }
+        return Array(steps.dropLast().suffix(2))
+    }
+
+    /// Optional compact tool-call line shown under the primary status when
+    /// it adds information the human-facing line omits (matches the widget
+    /// footer / Dynamic Island secondary row).
+    var secondaryStatusText: String? {
+        let primary = primaryStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tool = secondaryToolText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tool.isEmpty, tool != primary else { return nil }
+        return tool
+    }
 }
 
 /// Phases the iOS UI recognizes. Anything else lands on `.unknown` which

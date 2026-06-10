@@ -186,7 +186,7 @@ the task title.
 Format (one JSON object per block, wrapped exactly like this):
 
 [[DOIT_ARTIFACT]]
-{"key":"<stable id>","type":"link|email|calendar|text|image",
+{"key":"<stable id>","type":"link|email|calendar|text|image|options",
  "title":"<short label>","payload":{...}}
 [[/DOIT_ARTIFACT]]
 
@@ -200,6 +200,7 @@ Payload shapes by type:
 - image:    {"url":"https://...","provider":"figma|browser|openai|...",
              "prompt":"<optional source prompt>",
              "width":390,"height":844}
+- options:  structured comparison / booking list (see below)
 
 Rules:
 - Use a stable ``key`` per artifact and reuse the same key in a later turn
@@ -282,6 +283,55 @@ Guidelines for ``image`` artifacts:
   later turns to update an iteration in place.
 - Do not also emit a duplicate ``link`` artifact for the same image —
   one card per asset is enough.
+
+Comparison / booking options (``options``):
+When the user should revisit structured choices — flights, hotels, events,
+movie showtimes, haircut slots, rental cars, golf tee times, restaurants,
+or similar — emit one ``options`` artifact (not many separate artifacts per
+row). Domains differ via ``payload.category`` and per-item ``fields``, not
+via new artifact types.
+
+Payload shape:
+
+{"schema":"booking_option","category":"<domain>","provider":"<source>",
+ "summary":"<one-line context>","items":[{...}],"selected_id":null}
+
+Each item:
+
+{"id":"<stable id>","title":"<primary label>","subtitle":"<secondary>",
+ "badge":"<price or time>","url":"https://...",
+ "fields":[{"label":"...","value":"..."}],
+ "image_url":null}
+
+Rules:
+- Emit **one** ``options`` artifact per comparison set. Use distinct
+  ``key`` values when surfacing multiple unrelated sets in one reply
+  (``flight-options``, ``hotel-options``).
+- Set ``category`` to a short slug: ``flight``, ``hotel``, ``event``,
+  ``movie``, ``haircut``, ``golf``, ``rental_car``, ``restaurant``, …
+- Use ``fields`` for domain-specific columns (depart/arrive for flights,
+  check-in/out for hotels, theater/showtime for movies, stylist/duration
+  for haircuts). Do not invent new ``type`` values for each domain.
+- After the user picks or you book, re-emit the same artifact with
+  ``selected_id`` set to the chosen item's ``id``. Add optional
+  ``calendar`` / ``link`` / ``email`` artifacts for confirmations.
+- Mid-task comparisons (user must pick now): emit a
+  ``[[DOIT_INTERACTION]]`` block with ``kind":"choice"``, the same
+  options payload in ``content``, and ``options`` buttons whose ``id``
+  matches each ``items[].id``. Do not emit ``options`` artifacts in the
+  same reply as ``[[DOIT_INTERACTION]]``; re-emit them once the user
+  answers and the task finishes or you save picks for later.
+
+Category examples (fill ``fields`` appropriately):
+
+- flight: summary ``SFO → JFK, Tue Jun 10``; fields Depart / Arrive /
+  Airline; badge = price; provider ``google_flights`` when applicable.
+- hotel: summary ``San Francisco, 2 nights``; fields Check-in / Check-out /
+  Neighborhood; badge = nightly or total price.
+- haircut: summary ``Downtown salon, Saturday``; fields Stylist / Duration;
+  badge = price or time slot.
+- movie: summary ``AMC Metreon, Friday``; fields Theater / Showtime / Rating;
+  badge = ticket price; ``image_url`` for poster when available.
 
 Figma workflows:
 - Use available Figma Composio tools for connected-account work today:

@@ -7,10 +7,9 @@ Run this after applying the Supabase migration and deploying the runner/iOS app.
 1. In Doit, ask: `Change my sign off to Gabe`.
 2. Wait for the task to finish.
 3. Open Passbook and confirm a `What I know about you` card appears for the signoff.
-4. If the card is suggested, tap `Use This`.
-5. Open Settings > Memory and confirm the memory is active.
-6. Ask a second task that requires an email signoff, without mentioning Gabe.
-7. Confirm Doit uses `Gabe`.
+4. Open Settings > Memory and confirm the memory appears under `About you`.
+5. Ask a second task that requires an email signoff, without mentioning Gabe.
+6. Confirm Doit uses `Gabe`.
 
 ## VM Checks
 

@@ -7,6 +7,7 @@ from runner.memory_extraction import (
     MEMORY_OPEN,
     build_memory_extraction_prompt,
     parse_memory_extraction,
+    storage_status_for_extracted_memory,
 )
 
 
@@ -23,7 +24,6 @@ class MemoryExtractionTests(unittest.TestCase):
         self.assertEqual(len(memories), 1)
         self.assertEqual(memories[0].target, "user")
         self.assertEqual(memories[0].confidence, "high")
-        self.assertTrue(memories[0].should_auto_activate)
 
     def test_parse_drops_invalid_and_duplicate_items(self) -> None:
         text = (
@@ -39,7 +39,7 @@ class MemoryExtractionTests(unittest.TestCase):
         )
         memories = parse_memory_extraction(text)
         self.assertEqual(len(memories), 1)
-        self.assertFalse(memories[0].should_auto_activate)
+        self.assertEqual(memories[0].confidence, "medium")
 
     def test_parse_shortens_repeated_title_body(self) -> None:
         text = (
@@ -86,7 +86,20 @@ class MemoryExtractionTests(unittest.TestCase):
         )
         self.assertIn("relationship/contact/work/life context", prompt)
         self.assertIn("my wife Alessandra", prompt)
-        self.assertIn("medium-confidence suggested user memory", prompt)
+        self.assertIn("medium-confidence user memory", prompt)
+
+    def test_medium_confidence_memory_stores_active(self) -> None:
+        text = (
+            f"{MEMORY_OPEN}\n"
+            '{"memories":[{"target":"user","title":"Wife",'
+            '"body":"User\\u0027s wife is Alessandra.",'
+            '"confidence":"medium","reason":"Relationship clue from the task."}]}'
+            f"\n{MEMORY_CLOSE}"
+        )
+        memories = parse_memory_extraction(text)
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(memories[0].confidence, "medium")
+        self.assertEqual(storage_status_for_extracted_memory(memories[0]), "active")
 
 
 if __name__ == "__main__":

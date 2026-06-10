@@ -462,6 +462,13 @@ _TOOL_VERB_OVERRIDES: dict[str, str] = {
     "read": "Reading",
     "write": "Writing",
     "open": "Opening",
+    "navigate": "Browsing",
+    "snapshot": "Reading",
+    "click": "Clicking",
+    "type": "Typing",
+    "scroll": "Scrolling",
+    "vision": "Inspecting",
+    "back": "Browsing",
     "schedule": "Scheduling",
     "summarize": "Summarizing",
     "convert": "Converting",
@@ -493,7 +500,12 @@ _TOOL_CATEGORY_HINTS: tuple[tuple[str, str], ...] = (
     ("composio_manage_connections", "oauth"),
     ("composio_wait", "oauth"),
     ("connect", "oauth"),
+    ("browser_", "browser"),
+    ("browserbase", "browser"),
     ("search", "search"),
+    ("skills_list", "search"),
+    ("skill_view", "search"),
+    ("skills_search", "search"),
     ("browse", "browser"),
     ("fetch_url", "browser"),
     ("http", "browser"),
@@ -509,7 +521,11 @@ _TOOL_CATEGORY_HINTS: tuple[tuple[str, str], ...] = (
 _NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
-def _categorize_tool(tool_name: str | None) -> str:
+def _categorize_tool(tool_name: str | None, text: str | None = None) -> str:
+    if _is_browse_skill_terminal_call(tool_name, text):
+        return "browser"
+    if _is_browse_terminal_call(tool_name, text):
+        return "browser"
     if not tool_name:
         return "unknown"
     name = tool_name.lower()
@@ -525,6 +541,9 @@ def _humanize_tool_name(tool_name: str | None) -> str:
         return "Running a tool"
     if tool_name == "text_to_speech":
         return "Generating spoken summary"
+    browser_label = _browser_tool_label(tool_name)
+    if browser_label is not None:
+        return browser_label
     figma_label = _figma_tool_label(tool_name)
     if figma_label is not None:
         return figma_label
@@ -547,6 +566,51 @@ def _humanize_tool_name(tool_name: str | None) -> str:
     if verb:
         return f"{verb} {target}".strip()
     return f"Using {target}".strip()
+
+
+def _is_browse_terminal_call(tool_name: str | None, text: str | None) -> bool:
+    if not tool_name or not text:
+        return False
+    name = tool_name.lower()
+    if not any(token in name for token in ("terminal", "shell", "command", "execute")):
+        return False
+    return re.search(r"(^|\s)browse(\s|$)", text.lower()) is not None
+
+
+def _is_browse_skill_terminal_call(tool_name: str | None, text: str | None) -> bool:
+    if not tool_name or not text:
+        return False
+    name = tool_name.lower()
+    if not any(token in name for token in ("terminal", "shell", "command", "execute")):
+        return False
+    lowered = text.lower()
+    return (
+        "sync_browse_skill.py" in lowered
+        or re.search(r"(^|\s)browse\s+skills\s+(find|add)(\s|$)", lowered) is not None
+    )
+
+
+def _browser_tool_label(tool_name: str) -> str | None:
+    name = tool_name.lower()
+    labels = {
+        "browser_navigate": "Browsing the web",
+        "browser_snapshot": "Reading web page",
+        "browser_click": "Clicking web page",
+        "browser_type": "Typing on web page",
+        "browser_scroll": "Scrolling web page",
+        "browser_press": "Pressing browser key",
+        "browser_back": "Browsing back",
+        "browser_get_images": "Finding page images",
+        "browser_vision": "Inspecting browser screenshot",
+        "browser_console": "Checking browser console",
+        "browser_cdp": "Inspecting browser session",
+        "browser_dialog": "Handling browser dialog",
+    }
+    if name in labels:
+        return labels[name]
+    if name.startswith("browser_"):
+        return "Browsing the web"
+    return None
 
 
 def _figma_tool_label(tool_name: str) -> str | None:
@@ -613,7 +677,11 @@ def _label_for_tool_started(effect: Translated) -> tuple[str, str | None, str]:
     """
     tool = effect.tool_name
     title = _humanize_tool_name(tool)
-    category = _categorize_tool(tool)
+    category = _categorize_tool(tool, effect.text)
+    if _is_browse_skill_terminal_call(tool, effect.text):
+        title = "Finding browser skill"
+    elif _is_browse_terminal_call(tool, effect.text):
+        title = "Browsing the web"
     detail: str | None = None
     raw_text = (effect.text or "").strip()
     # Strip the redundant "Using <tool>." prefix the translator prepends
@@ -632,12 +700,26 @@ def _label_for_tool_result(effect: Translated) -> tuple[str, str | None, str]:
     tool = effect.tool_name
     base = _humanize_tool_name(tool)
     raw_text = (effect.text or "").strip()
-    category = _categorize_tool(tool)
+    category = _categorize_tool(tool, effect.text)
+    is_browse_skill = _is_browse_skill_terminal_call(tool, effect.text)
+    if is_browse_skill:
+        base = "Browser skill"
+    elif _is_browse_terminal_call(tool, effect.text):
+        base = "Browser session"
     if "hit an issue" in raw_text.lower() or "tool failed" in raw_text.lower():
-        target = base.split(" ", 1)[1] if " " in base else base
+        if is_browse_skill:
+            target = "Browser skill"
+        elif _is_browse_terminal_call(tool, effect.text):
+            target = "Browser session"
+        else:
+            target = base.split(" ", 1)[1] if " " in base else base
         title = f"{target} hit an issue"
         detail = _clip(raw_text, _DETAIL_LIMIT) if raw_text else None
         return title, detail, category
+    if is_browse_skill:
+        return "Updated browser skill", _clip(raw_text, _DETAIL_LIMIT) if raw_text else None, category
+    if _is_browse_terminal_call(tool, effect.text):
+        return "Reviewed browser session", _clip(raw_text, _DETAIL_LIMIT) if raw_text else None, category
     # Past-tense-ish: "Searching" -> "Reviewed", "Drafting" -> "Reviewed".
     # We deliberately keep this simple — the iOS card will animate the
     # shimmer off once `state` flips to `tool_done` regardless.

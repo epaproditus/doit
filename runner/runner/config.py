@@ -32,6 +32,12 @@ class Config:
     openai_api_key: str
     anthropic_api_key: str
     openrouter_api_key: str
+    browserbase_api_key: str
+    browserbase_project_id: str
+    browse_skill_auto_install: bool
+    browse_skill_install_timeout_secs: float
+    browse_skill_min_confidence: float
+    browse_skill_sync_script: str
     apns_key_path: str
     apns_key_id: str
     apns_team_id: str
@@ -56,6 +62,12 @@ def load() -> Config:
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+        browserbase_api_key=os.environ.get("BROWSERBASE_API_KEY", ""),
+        browserbase_project_id=os.environ.get("BROWSERBASE_PROJECT_ID", ""),
+        browse_skill_auto_install=_bool("BROWSE_SKILL_AUTO_INSTALL", default=False),
+        browse_skill_install_timeout_secs=float(os.environ.get("BROWSE_SKILL_INSTALL_TIMEOUT_SECS", "30")),
+        browse_skill_min_confidence=float(os.environ.get("BROWSE_SKILL_MIN_CONFIDENCE", "0")),
+        browse_skill_sync_script=os.environ.get("BROWSE_SKILL_SYNC_SCRIPT", ""),
         apns_key_path=os.environ.get("APNS_KEY_PATH", ""),
         apns_key_id=os.environ.get("APNS_KEY_ID", ""),
         apns_team_id=os.environ.get("APNS_TEAM_ID", ""),

@@ -160,6 +160,7 @@ struct AudioArtifactCard: View {
     }
 
     private func togglePlayback() {
+        ArtifactCardLayout.playTapHaptic()
         state.togglePlayback()
     }
 

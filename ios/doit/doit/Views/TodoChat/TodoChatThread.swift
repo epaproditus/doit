@@ -462,6 +462,8 @@ private struct AgentInteractionMessage: View {
                 EmailDraftPreview(draft: draft)
             } else if let invite = interaction.calendarInvite {
                 CalendarInvitePreview(invite: invite)
+            } else if let options = interaction.optionsPayload {
+                OptionsPreview(payload: options)
             } else if let content = interaction.content {
                 JSONPreview(value: content)
             }
@@ -700,6 +702,10 @@ private struct CalendarInviteDraft: Hashable {
 private extension ChatInteractionEnvelope {
     var calendarInvite: CalendarInviteDraft? {
         content.flatMap(CalendarInviteDraft.init(content:))
+    }
+
+    var optionsPayload: OptionsPayload? {
+        content.flatMap(OptionsPayload.init(json:))
     }
 }
 

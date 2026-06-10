@@ -18,6 +18,7 @@ from runner.events import (
     ARTIFACT_OPEN,
     INTERACTION_CLOSE,
     INTERACTION_OPEN,
+    _ARTIFACT_KINDS,
     collapse_done_leadins,
     merge_terminal_translated,
     normalize_visible_reply,
@@ -78,6 +79,37 @@ class ParseArtifactsTests(unittest.TestCase):
     def test_unknown_type_is_dropped(self) -> None:
         text = wrap('{"key":"weird","type":"video","payload":{"url":"x"}}')
         self.assertEqual(parse_artifacts(text), [])
+
+    def test_options_kind_in_allowlist(self) -> None:
+        self.assertIn("options", _ARTIFACT_KINDS)
+
+    def test_options_artifact_keeps_payload(self) -> None:
+        text = wrap(
+            '{"key":"flight-options","type":"options","title":"Flight options",'
+            '"payload":{"schema":"booking_option","category":"flight",'
+            '"provider":"google_flights","summary":"SFO → JFK, Tue Jun 10",'
+            '"items":[{"id":"ua-815","title":"United · 8:15 AM",'
+            '"subtitle":"1h 32m · Nonstop","badge":"$189",'
+            '"fields":[{"label":"Depart","value":"8:15 AM SFO"}]}],'
+            '"selected_id":null}}'
+        )
+        result = parse_artifacts(text)
+        self.assertEqual(len(result), 1)
+        artifact = result[0]
+        self.assertEqual(artifact.kind, "options")
+        self.assertEqual(artifact.key, "flight-options")
+        self.assertEqual(artifact.payload["category"], "flight")
+        self.assertEqual(len(artifact.payload["items"]), 1)
+        self.assertEqual(artifact.payload["items"][0]["id"], "ua-815")
+
+    def test_options_unknown_category_still_parsed(self) -> None:
+        text = wrap(
+            '{"key":"opts","type":"options","payload":{'
+            '"category":"spaceship","items":[{"id":"a","title":"Ship A"}]}}'
+        )
+        result = parse_artifacts(text)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].payload["category"], "spaceship")
 
     def test_image_artifact_is_recognized(self) -> None:
         # Images go through a dedicated runner persistence path; the

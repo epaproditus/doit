@@ -66,11 +66,19 @@ Deployed from `functions/integrations/`. Proxies Composio's REST API so the
 Composio API key never reaches the iOS app.
 
 ```bash
+   # run from the repo root (not supabase/)
    supabase functions deploy integrations
    supabase functions deploy agent-settings
+   supabase functions deploy task-suggestions
    supabase secrets set COMPOSIO_API_KEY=ck_...
    supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<service_role>
+   supabase secrets set OPENAI_API_KEY=<openai_key>
 ```
+
+The `task-suggestions` function powers the iOS homescreen "Suggested" tiles.
+It reads recent todo history server-side and calls OpenAI (`OPENAI_SUGGESTIONS_MODEL`,
+default `gpt-5.4-mini`) to generate personalized next-task ideas. Requires
+`OPENAI_API_KEY` and `SUPABASE_SERVICE_ROLE_KEY` as Edge Function secrets.
 
 The function reads the caller's `auth.uid()` from the JWT and uses it as the
 Composio `entity_id`, so each user only sees their own connections.
@@ -90,4 +98,10 @@ catalog. Provider API keys are global runner secrets, not app input.
 | `OPENAI_API_KEY` | Runner (VM env) | global Doit-paid OpenAI models |
 | `ANTHROPIC_API_KEY` | Runner (VM env) | global Doit-paid Claude models |
 | `OPENROUTER_API_KEY` | Runner (VM env) | global Doit-paid OpenRouter models |
+| `BROWSERBASE_API_KEY` | Runner (VM env) and synced to `~/.hermes/.env` | Browserbase cloud browser sessions for Hermes browser tools and browse.sh CLI |
+| `BROWSERBASE_PROJECT_ID` | Runner (VM env) and synced to `~/.hermes/.env` | Browserbase project for managed browser sessions |
 | Apple `.p8` (APNs) | Runner (VM env) | push notifications |
+
+The on-demand browse.sh skill bridge is VM-only. It uses the runner's
+`BROWSE_SKILL_*` env flags and `hermes/scripts/sync_browse_skill.py`; it does
+not require any Supabase secret or schema change.

@@ -371,14 +371,35 @@ enum TodoRealtimeHub {
             tool_name: record["tool_name"]?.stringValue,
             tool_call_id: record["tool_call_id"]?.stringValue,
             tool_category: record["tool_category"]?.stringValue,
-            // The raw Realtime payload is enough to update the visible
-            // status line immediately. A REST refinement below fills the
-            // nested `payload.steps` history for the stacked activity cards.
-            payload: nil,
+            payload: jsonValue(from: record["payload"]),
             started_at: startedAt,
             updated_at: updatedAt,
             completed_at: date(from: record["completed_at"]?.stringValue)
         )
+    }
+
+    private static func jsonValue(from any: AnyJSON?) -> JSONValue? {
+        guard let any, !any.isNil else { return nil }
+        return jsonValueNonOptional(from: any)
+    }
+
+    private static func jsonValueNonOptional(from any: AnyJSON) -> JSONValue {
+        switch any {
+        case .null:
+            return .null
+        case .bool(let value):
+            return .bool(value)
+        case .integer(let value):
+            return .number(Double(value))
+        case .double(let value):
+            return .number(value)
+        case .string(let value):
+            return .string(value)
+        case .object(let object):
+            return .object(object.mapValues { jsonValueNonOptional(from: $0) })
+        case .array(let array):
+            return .array(array.map { jsonValueNonOptional(from: $0) })
+        }
     }
 
     private static func todo(from record: [String: AnyJSON]) -> Todo? {

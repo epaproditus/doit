@@ -15,21 +15,24 @@ A single async loop:
    or `memories/MEMORY.md` so Hermes picks them up in this run's frozen
    snapshot, and surfaces the same entries in the prompt so the agent can
    curate them via its `memory` tool (see "Memory" below).
-5. `POST http://127.0.0.1:<port>/v1/runs` with the todo text + a system prompt,
+5. Optionally pre-installs a matching browse.sh skill into `~/.hermes/skills`
+   for browser-heavy tasks before Hermes starts, so the skill is visible during
+   the run.
+6. `POST http://127.0.0.1:<port>/v1/runs` with the todo text + a system prompt,
    using a per-todo `session_id = doit-todo-<uuid>` and a per-user
    `X-Hermes-Session-Key = doit-user:<uuid>` header. The per-todo session id
    matters because Hermes injects MEMORY.md/USER.md as a *frozen* snapshot at
    session start; rotating it per todo guarantees the next run sees the
    latest memory writes. Cross-todo continuity comes from `session_search`
    (FTS5 over `state.db`) and the per-profile memory files.
-6. Consumes `GET /v1/runs/{id}/events` (Server-Sent Events).
-7. Translates Hermes events into rows in `todo_steps` and status changes on
+7. Consumes `GET /v1/runs/{id}/events` (Server-Sent Events).
+8. Translates Hermes events into rows in `todo_steps` and status changes on
    `todos`. The iOS app sees them live via Supabase Realtime. `memory` and
    `session_search` tool calls get their own activity-feed labels so it's
    easy to confirm the agent is actually using its memory.
-8. After the run, mirrors Hermes' updated `USER.md` / `MEMORY.md` back into
+9. After the run, mirrors Hermes' updated `USER.md` / `MEMORY.md` back into
    Supabase so Settings > Memory shows what the agent has learned.
-9. Sends APNs pushes on the key moments: **needs Gmail auth**, **needs your
+10. Sends APNs pushes on the key moments: **needs Gmail auth**, **needs your
    input**, **done**, **failed**.
 
 Concurrently it polls the todo's status — if the user sets it to `cancelled`,
@@ -74,6 +77,51 @@ cp .env.example .env  # fill in real values
 python -m runner
 ```
 
+## Environment
+
+The runner reads secrets from `runner/.env` on the VM. Keep this file out of
+git; `runner/.env.example` is the committed template.
+
+Core values:
+
+| Variable | Purpose |
+| --- | --- |
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used by the runner to bypass RLS |
+| `HERMES_PROFILES_DIR` | Root directory for per-user Hermes profiles |
+| `HERMES_RESTART_COMMAND_TEMPLATE` | Restart command used after profile config changes |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` | Global Doit-paid model provider keys |
+| `BROWSERBASE_API_KEY` / `BROWSERBASE_PROJECT_ID` | Browserbase credentials for Hermes browser automation and browse.sh CLI sessions |
+| `BROWSE_SKILL_AUTO_INSTALL` | Enables runner preflight install of matching browse.sh skills before Hermes starts |
+| `BROWSE_SKILL_INSTALL_TIMEOUT_SECS` | Timeout for browse.sh skill discovery/install bridge commands |
+| `BROWSE_SKILL_MIN_CONFIDENCE` | Reserved threshold for future browse.sh ranking metadata; keep `0` today |
+| `BROWSE_SKILL_SYNC_SCRIPT` | Optional override for the bridge script path, defaulting to `/opt/doit/hermes/scripts/sync_browse_skill.py` in the VM layout |
+| `APNS_*` | Push notification credentials |
+
+Browserbase is read by Hermes from the global `~/.hermes/.env`, not directly
+from `runner/.env`. After adding or rotating `BROWSERBASE_API_KEY` and
+`BROWSERBASE_PROJECT_ID` in `runner/.env`, sync them on the VM:
+
+```bash
+cd /path/to/repo
+python3 hermes/scripts/sync_browserbase_env.py --restart
+```
+
+This updates `~/.hermes/.env` with mode `600` and restarts the `hermes-*`
+gateway services so both Hermes `browser_*` tools and terminal-driven `browse`
+CLI commands can use Browserbase.
+
+The on-demand browse.sh bridge lives at `hermes/scripts/sync_browse_skill.py`.
+When `BROWSE_SKILL_AUTO_INSTALL=true`, the runner calls it before execution for
+browser-heavy tasks, installs the best matching catalog skill into
+`~/.hermes/skills`, and restarts that Hermes profile before `start_run`.
+Manual smoke test:
+
+```bash
+python3 /opt/doit/hermes/scripts/sync_browse_skill.py --query "cheap flights SFO JFK"
+hermes skills list | grep search-flights
+```
+
 ## Tests
 
 Pure-python checks (no Supabase / Hermes / network) for the bits that are
@@ -97,7 +145,9 @@ one-liner from the repo root on your dev machine:
 ./scripts/deploy-runner.sh
 ```
 
-That rsyncs `runner/runner/` to the VM and restarts `doit-runner`. It
+That rsyncs `runner/runner/`, `hermes/scripts/`, and bundled `hermes/skills/`
+to the VM, installs bundled skills into `~/.hermes/skills`, and restarts
+`doit-runner`. It
 deliberately excludes `.venv` (platform-specific) and `.env` (real secrets
 live only on the VM), so it's safe to re-run.
 

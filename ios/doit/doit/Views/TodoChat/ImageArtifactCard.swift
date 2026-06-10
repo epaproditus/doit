@@ -136,6 +136,7 @@ struct ImageArtifactCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onTapGesture {
             guard state.signedURL != nil else { return }
+            ArtifactCardLayout.playTapHaptic()
             isPresentingFullScreen = true
         }
         .accessibilityAddTraits(.isImage)

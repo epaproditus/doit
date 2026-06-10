@@ -25,23 +25,17 @@ struct AgentActivityCard: View {
     }
 
     private var stackItems: [AgentIntentCardModel] {
-        var items = activity.recentSteps.map(AgentIntentCardModel.init(step:))
-        let current = currentCard
-
-        if items.last?.title != current.title {
-            items.append(current)
-        } else if !items.isEmpty {
-            items[items.count - 1] = current
-        } else {
-            items = [current]
-        }
+        // Mirror the widget: stacked cards are *previous* intents only;
+        // the snapshot's top-level fields drive the front card.
+        var items = activity.stackPreviousSteps.map(AgentIntentCardModel.init(step:))
+        items.append(currentCard)
         return Array(items.suffix(Self.maxVisibleCards))
     }
 
     private var currentCard: AgentIntentCardModel {
-        if isTaskActive, !activity.isRunning {
+        if isTaskActive, !activity.isRunning, activity.resolvedState != .paused {
             return AgentIntentCardModel(
-                id: "rerun-\(activity.todo_id.uuidString)-\(activity.activityContentSignature)",
+                id: "rerun-\(activity.todo_id.uuidString)",
                 title: "Starting agent…",
                 symbolName: AgentToolCategory.thinking.symbolName,
                 isCompleted: false

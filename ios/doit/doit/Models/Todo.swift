@@ -427,7 +427,7 @@ enum MemoryLifecycleStatus: String, Codable, Sendable {
 
     var label: String {
         switch self {
-        case .proposed: return "Suggested"
+        case .proposed: return "Remembered"
         case .active: return "Active"
         case .rejected: return "Rejected"
         case .deleted: return "Forgotten"
@@ -466,6 +466,7 @@ struct AgentMemory: Codable, Identifiable, Hashable, Sendable {
     var effectiveMemoryStatus: MemoryLifecycleStatus { memory_status ?? .active }
     var isVisibleMemory: Bool { effectiveMemoryStatus != .deleted }
     var isSuggestedMemory: Bool { effectiveMemoryStatus == .proposed }
+    var isUsableMemory: Bool { effectiveMemoryStatus == .active || effectiveMemoryStatus == .proposed }
     var isActiveMemory: Bool { effectiveMemoryStatus == .active }
 }
 

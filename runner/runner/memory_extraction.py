@@ -41,9 +41,9 @@ MEMORY_EXTRACT_INSTRUCTIONS = (
     "\"my wife\", \"my husband\", \"my partner\", \"my assistant\", "
     "\"my manager\", or \"my coworker\" are strong clues that the named person "
     "may matter again.\n\n"
-    "Stay conservative about commitment, not detection. Return plausible "
-    "personal/work/life clues as medium-confidence proposed memories so the "
-    "user can review them. Use high confidence only for explicit remember/save "
+    "Stay conservative about confidence, not detection. Return plausible "
+    "personal/work/life clues as medium-confidence memories with a clear reason "
+    "so the user can later edit or forget them. Use high confidence only for explicit remember/save "
     "requests or clear reusable preferences such as \"change my signoff to "
     "Gabe\", \"make my emails shorter\", or \"when emailing Nick, keep it "
     "casual\".\n\n"
@@ -81,10 +81,6 @@ class MemoryCandidate:
     body: str
     confidence: MemoryConfidence
     reason: str
-
-    @property
-    def should_auto_activate(self) -> bool:
-        return self.confidence == "high"
 
 
 def build_memory_extraction_prompt(
@@ -158,8 +154,8 @@ def build_memory_extraction_prompt(
         "high-confidence user memory even though the user did not say remember. "
         "If the task mentioned relationship/contact/work/life context like "
         "\"my wife Alessandra\" or \"my manager Jordan\", return it as a "
-        "medium-confidence suggested user memory unless the user explicitly "
-        "asked Doit to remember it.",
+        "medium-confidence user memory unless the user explicitly asked Doit "
+        "to remember it.",
     ]
     return "\n".join(lines)
 
@@ -211,6 +207,11 @@ def parse_memory_extraction(text: str) -> list[MemoryCandidate]:
             )
         )
     return candidates
+
+
+def storage_status_for_extracted_memory(_: MemoryCandidate) -> str:
+    """Extracted memories are usable immediately; confidence remains metadata."""
+    return "active"
 
 
 def _clean_choice(value: Any, allowed: set[str], *, default: str) -> str:

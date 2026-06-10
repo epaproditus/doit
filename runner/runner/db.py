@@ -11,6 +11,7 @@ from supabase import Client, create_client
 
 from .config import Config
 from .hermes import HermesEndpoint
+from .memory_dedupe import best_duplicate_memory
 
 log = logging.getLogger(__name__)
 
@@ -391,6 +392,23 @@ class DB:
             log.error("list_active_memories_for_sync(%s) failed: %s", user_id, e)
             return []
 
+    def list_memories_for_extraction_context(self, user_id: str) -> list[dict]:
+        """Existing non-deleted memories shown to the extractor for dedupe."""
+        try:
+            resp = (
+                self._client.table("memories")
+                .select("id, title, body, target, source, memory_status")
+                .eq("user_id", user_id)
+                .neq("memory_status", "deleted")
+                .order("updated_at", desc=True)
+                .limit(80)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            log.error("list_memories_for_extraction_context(%s) failed: %s", user_id, e)
+            return []
+
     def list_synced_memories(self, user_id: str) -> list[dict]:
         """All rows that have a Hermes fingerprint, for the reverse sync diff."""
         try:
@@ -463,15 +481,16 @@ class DB:
         try:
             existing = (
                 self._client.table("memories")
-                .select("id, memory_status")
+                .select("id, title, body, target, source, memory_status")
                 .eq("user_id", user_id)
                 .eq("target", target)
-                .eq("body", body)
                 .neq("memory_status", "deleted")
-                .limit(1)
+                .limit(100)
                 .execute()
             )
             rows = existing.data or []
+            candidate = {"title": title, "body": body}
+            duplicate = best_duplicate_memory(rows, candidate)
             patch = {
                 "title": title[:_TITLE_MAX],
                 "body": body[:2000],
@@ -485,14 +504,11 @@ class DB:
                 "hermes_fingerprint": None,
                 "sync_error": None,
             }
-            if rows:
-                current = rows[0].get("memory_status")
-                # Do not resurrect memories the user already rejected unless
-                # they are encountered again as high-confidence active facts.
-                if current == "rejected" and memory_status != "active":
-                    return
+            if duplicate is not None:
+                if duplicate.get("source") == "user":
+                    patch.pop("source", None)
                 self._client.table("memories").update(patch).eq(
-                    "id", rows[0]["id"]
+                    "id", duplicate["id"]
                 ).execute()
                 return
             row = {"user_id": user_id, "category": None, **patch}

@@ -235,6 +235,7 @@ struct TodoDetailView: View {
                 await store.refreshTodo(id: todoID)
                 await store.refreshArtifacts(for: todoID)
                 await store.refreshInteractions(for: todoID)
+                await store.refreshAgentActivity(for: todoID)
                 await loadSteps()
                 await loadMessages()
             }

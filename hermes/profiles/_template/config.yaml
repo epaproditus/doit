@@ -37,11 +37,24 @@ memory:
   memory_char_limit: 2200
   user_char_limit: 1375
 
-# Keep the agent focused — no terminal/filesystem on the cloud box.
-# Composio is the only tool surface for real-world actions; Hermes' built-in
-# web / vision / image / TTS tools (and `memory`, `session_search`) remain
-# available via the Nous Portal.
+# Browserbase-backed browsing is enabled for public web tasks. Hermes still
+# routes private/loopback URLs to a local sidecar so cloud browsers never try to
+# reach the VM's internal network.
+browser:
+  cloud_provider: browserbase
+  auto_local_for_private_urls: true
+
+# The browse.sh CLI runs through Hermes' terminal tool. Pass only the
+# Browserbase credentials it needs for remote browser sessions.
+terminal:
+  env_passthrough:
+    - BROWSERBASE_API_KEY
+    - BROWSERBASE_PROJECT_ID
+
+# Keep higher-risk delegation disabled on the cloud box.
+#
+# Terminal is intentionally enabled so browse.sh skills that use the `browse`
+# CLI can execute exactly as documented. Do not add general filesystem or
+# delegate access without a separate security review.
 disabled_toolsets:
-  - terminal
-  - browser
   - delegate

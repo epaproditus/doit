@@ -1,8 +1,13 @@
 import SwiftUI
+import UIKit
 
 enum ArtifactCardLayout {
-    static let contentPadding: CGFloat = 14
-    static let verticalSectionPadding: CGFloat = 12
+    static let contentPadding: CGFloat = 18
+    static let verticalSectionPadding: CGFloat = 16
+
+    static func playTapHaptic() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
 }
 
 /// Collapsible body copy for task-header artifact cards. Long emails,
@@ -80,6 +85,62 @@ struct ArtifactTruncatableSection<Content: View>: View {
                 }
             }
         }
+    }
+}
+
+/// Link artifact glyph: bundled connection logo when we have one, otherwise
+/// a host favicon, then a generic link symbol.
+struct LinkArtifactIcon: View {
+    let provider: String?
+    let url: URL?
+
+    var body: some View {
+        Group {
+            if let slug = bundledSlug {
+                ConnectionLogo(slug: slug)
+            } else if let faviconURL {
+                AsyncImage(url: faviconURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    case .failure:
+                        genericLinkIcon
+                    case .empty:
+                        genericLinkIcon
+                            .opacity(0.45)
+                    @unknown default:
+                        genericLinkIcon
+                    }
+                }
+            } else {
+                genericLinkIcon
+            }
+        }
+    }
+
+    private var bundledSlug: String? {
+        guard let slug = provider?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !slug.isEmpty,
+              UIImage(named: slug) != nil else {
+            return nil
+        }
+        return slug
+    }
+
+    private var faviconURL: URL? {
+        guard let host = url?.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return nil
+        }
+        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
+    }
+
+    private var genericLinkIcon: some View {
+        Image(systemName: "link")
+            .font(.system(size: 12, weight: .regular))
+            .foregroundStyle(.secondary)
     }
 }
 

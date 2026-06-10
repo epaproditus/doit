@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Push the runner Python module to the VM and bounce the systemd service.
+# Push the runner Python module and Hermes helper files to the VM, then bounce
+# the systemd service.
 #
 # The runner deployment is intentionally low-tech: a single rsync of the
-# `runner/runner/` package onto the VM, then `systemctl restart` of the
-# `doit-runner` service. No CI, no container registry, no Docker image to
-# build — fits the single-droplet hobby setup.
+# `runner/runner/` package plus the small Hermes helper scripts/skills the
+# runner calls, then `systemctl restart` of the `doit-runner` service.
+# No CI, no container registry, no Docker image to build — fits the
+# single-droplet hobby setup.
 #
 # VM coords are read from env so a future move to a different host doesn't
 # require editing this script. Defaults match the current droplet so a
@@ -25,14 +27,41 @@ VM_HOST="${DOIT_VM_HOST:-root@162.243.30.100}"
 VM_PATH="${DOIT_VM_PATH:-/opt/doit/runner}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$REPO_ROOT/runner/runner/"
-DEST="$VM_HOST:$VM_PATH/runner/"
+RUNNER_SRC="$REPO_ROOT/runner/runner/"
+RUNNER_DEST="$VM_HOST:$VM_PATH/runner/"
+HERMES_SCRIPTS_SRC="$REPO_ROOT/hermes/scripts/"
+HERMES_SCRIPTS_DEST="$VM_HOST:$(dirname "$VM_PATH")/hermes/scripts/"
+HERMES_SKILLS_SRC="$REPO_ROOT/hermes/skills/"
+HERMES_SKILLS_DEST="$VM_HOST:$(dirname "$VM_PATH")/hermes/skills/"
 
-echo ">> rsync $SRC -> $DEST"
+echo ">> ensure Hermes helper directories on $VM_HOST"
+ssh "$VM_HOST" "
+  mkdir -p '$(dirname "$VM_PATH")/hermes/scripts' '$(dirname "$VM_PATH")/hermes/skills'
+"
+
+echo ">> rsync $RUNNER_SRC -> $RUNNER_DEST"
 rsync -avc --delete \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
-  "$SRC" "$DEST"
+  "$RUNNER_SRC" "$RUNNER_DEST"
+
+echo ">> rsync $HERMES_SCRIPTS_SRC -> $HERMES_SCRIPTS_DEST"
+rsync -avc --delete \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  "$HERMES_SCRIPTS_SRC" "$HERMES_SCRIPTS_DEST"
+
+echo ">> rsync $HERMES_SKILLS_SRC -> $HERMES_SKILLS_DEST"
+rsync -avc --delete \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  "$HERMES_SKILLS_SRC" "$HERMES_SKILLS_DEST"
+
+echo ">> install bundled Hermes skills on $VM_HOST"
+ssh "$VM_HOST" "
+  mkdir -p ~/.hermes/skills &&
+  rsync -avc '$(dirname "$VM_PATH")/hermes/skills/' ~/.hermes/skills/
+"
 
 echo ">> install runner deps on $VM_HOST"
 ssh "$VM_HOST" "

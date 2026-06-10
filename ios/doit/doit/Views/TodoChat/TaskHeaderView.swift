@@ -15,7 +15,7 @@ private enum TaskHeaderLayout {
     /// chat panel begins.
     static let artifactsBottomPadding: CGFloat = 18
     static let artifactSeparatorLength: CGFloat = 10
-    static let artifactSeparatorThickness: CGFloat = 3
+    static let artifactSeparatorThickness: CGFloat = 1
     static let artifactSeparatorSpacing: CGFloat = 5
 }
 
@@ -86,7 +86,7 @@ struct TaskHeaderView: View {
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .animation(.smooth(duration: 0.3), value: agentStatus)
-            .animation(.smooth(duration: 0.3), value: agentActivity?.updated_at)
+            .animation(.smooth(duration: 0.3), value: agentActivity?.activitySignature)
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -209,6 +209,11 @@ struct TaskHeaderView: View {
             if let activity = agentActivity, shouldShowActivityCard(activity) {
                 Button(action: onTapActivity) {
                     AgentActivityCard(activity: activity, isTaskActive: todo.status.isActive)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(Color.primary.opacity(0.04))
+                        )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open chat")
@@ -298,6 +303,7 @@ struct TaskHeaderView: View {
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 Button {
+                    ArtifactCardLayout.playTapHaptic()
                     withAnimation(.smooth(duration: 0.25)) {
                         isEmailBatchExpanded.toggle()
                     }
@@ -332,18 +338,20 @@ struct TaskHeaderView: View {
 
     private func emailBatchPill(emails: [TodoArtifact]) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            ArtifactCardLeadingIcon(glyphSize: 12, circleSize: 28) {
+            ArtifactCardLeadingIcon {
                 ConnectionLogo(slug: emails.first?.emailProvider ?? "gmail")
             }
 
             Text("\(emails.count) emails sent")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.primary)
-
-            Spacer(minLength: 8)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "chevron.down")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .rotationEffect(.degrees(isEmailBatchExpanded ? 180 : 0))
         }
@@ -351,8 +359,13 @@ struct TaskHeaderView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.primary.opacity(0.06))
+                .fill(Color.white)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.05), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.06), radius: 10, x: 0, y: 4)
     }
 
     /// Formats a creation timestamp the way iOS apps usually do — anchored
@@ -420,6 +433,7 @@ struct TaskArtifactView: View {
             case .text: TextArtifactCard(artifact: artifact)
             case .audio: AudioArtifactCard(artifact: artifact)
             case .image: ImageArtifactCard(artifact: artifact)
+            case .options: OptionsArtifactCard(artifact: artifact)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -479,7 +493,10 @@ private struct ArtifactCardShell<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
 
         if let onTap {
-            Button(action: onTap) { card }
+            Button(action: {
+                ArtifactCardLayout.playTapHaptic()
+                onTap()
+            }) { card }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(.isLink)
         } else {
@@ -488,9 +505,8 @@ private struct ArtifactCardShell<Content: View>: View {
     }
 }
 
-/// Open-in-browser card for `link` artifacts. The leading glyph is the
-/// provider's `ConnectionLogo` when we have a slug for it (gmail,
-/// googlesheets, googledocs, …) and a generic link symbol otherwise.
+/// Open-in-browser card for `link` artifacts. The leading glyph prefers a
+/// bundled connection logo, then a host favicon, then a generic link symbol.
 private struct LinkArtifactCard: View {
     let artifact: TodoArtifact
     @Environment(\.openURL) private var openURL
@@ -502,7 +518,7 @@ private struct LinkArtifactCard: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if let url {
-                    openURL(url)
+                    openLink(url)
                 }
             }
             .accessibilityElement(children: .combine)
@@ -511,34 +527,26 @@ private struct LinkArtifactCard: View {
 
     @ViewBuilder
     private func cardBody(title: String, url: URL?) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            ArtifactCardLeadingIcon { providerIcon }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let host = url?.host {
-                    Text(host)
-                        .font(.system(size: 12, weight: .regular, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+        HStack(alignment: .center, spacing: 10) {
+            ArtifactCardLeadingIcon {
+                LinkArtifactIcon(provider: artifact.provider, url: artifact.url)
             }
-            Spacer(minLength: 8)
+            Text(title)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let url {
                 Button {
-                    openURL(url)
+                    openLink(url)
                 } label: {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
                         .padding(.horizontal, 6)
-                        .padding(.top, 2)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -558,15 +566,9 @@ private struct LinkArtifactCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private var providerIcon: some View {
-        if let slug = artifact.provider, !slug.isEmpty {
-            ConnectionLogo(slug: slug)
-        } else {
-            Image(systemName: "link")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.secondary)
-        }
+    private func openLink(_ url: URL) {
+        ArtifactCardLayout.playTapHaptic()
+        openURL(url)
     }
 }
 
@@ -666,6 +668,7 @@ private struct CalendarArtifactCard: View {
                     }
                     if let url = event?.url {
                         Button {
+                            ArtifactCardLayout.playTapHaptic()
                             openURL(url)
                         } label: {
                             HStack(spacing: 6) {
@@ -713,28 +716,100 @@ private struct CalendarArtifactCard: View {
     }
 }
 
-/// Plain-text deliverable (e.g. a generated summary or snippet). Long
-/// results collapse with a show-more affordance so the header stays compact.
+/// Plain-text deliverable (e.g. a generated summary or snippet). The
+/// header row toggles a grey body panel below; long results start
+/// collapsed with a chevron instead of an inline "Show more" link.
 private struct TextArtifactCard: View {
     let artifact: TodoArtifact
 
+    @State private var isExpanded = false
+
     var body: some View {
         let body = artifact.text ?? ""
-        ArtifactCardShell(
-            icon: AnyView(
-                Image(systemName: "text.alignleft")
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(.secondary)
-            ),
-            title: artifact.title ?? "Result"
-        ) {
-            if !body.isEmpty {
-                TruncatableArtifactText(
-                    text: body,
-                    lineLimit: 4,
-                    foregroundStyle: Color.primary
-                )
+        let title = artifact.title ?? "Result"
+        let hasBody = !body.isEmpty
+        let collapsible = hasBody && isTruncatable(body)
+
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                guard collapsible else { return }
+                ArtifactCardLayout.playTapHaptic()
+                withAnimation(.smooth(duration: 0.25)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .center, spacing: 10) {
+                    ArtifactCardLeadingIcon {
+                        Image(systemName: "text.alignleft")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if collapsible {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    }
+                }
+                .padding(ArtifactCardLayout.contentPadding)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!collapsible)
+            .accessibilityLabel(title)
+            .accessibilityHint(
+                collapsible
+                    ? (isExpanded ? "Collapse response" : "Expand response")
+                    : ""
+            )
+
+            if hasBody, !collapsible || isExpanded {
+                Text(body)
+                    .font(.system(size: 15, weight: .regular, design: .rounded))
+                    .foregroundStyle(Color.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(ArtifactCardLayout.contentPadding)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background {
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 0,
+                            bottomLeadingRadius: 18,
+                            bottomTrailingRadius: 18,
+                            topTrailingRadius: 0,
+                            style: .continuous
+                        )
+                        .fill(Color.primary.opacity(0.04))
+                    }
             }
         }
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.05), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.06), radius: 10, x: 0, y: 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func isTruncatable(_ text: String) -> Bool {
+        let lineLimit = 4
+        let lines = text.components(separatedBy: .newlines)
+        if lines.count > lineLimit { return true }
+        return text.count > lineLimit * 40
     }
 }

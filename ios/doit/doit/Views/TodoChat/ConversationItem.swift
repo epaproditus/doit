@@ -153,7 +153,7 @@ enum ConversationBuilder {
             // snapshot has landed yet — typically the first beat of a
             // run before the runner upserts `todo_agent_activity`.
             if let activity = agentActivity,
-               let label = thinkingLabel(for: activity) {
+               let label = thinkingLabel(for: activity, todoIsActive: todo.status.isActive) {
                 items.append(.agentThinking(label: label))
             } else {
                 let latestActivity = steps
@@ -285,16 +285,24 @@ private func thinkingLabel(for step: TodoStep?) -> String {
 
 /// Maps the live `AgentActivity` snapshot to a chat-thread placeholder
 /// label. We prefer the runner-provided human-facing detail copy
-/// (matching the home card subtitle and detail-view animated cards)
-/// so all four "what is the agent doing?" surfaces stay in sync.
+/// (matching the home card subtitle, detail-view cards, and Live
+/// Activity widget) so every "what is the agent doing?" surface stays
+/// in sync.
 ///
-/// Returns `nil` when the snapshot isn't useful for a placeholder
-/// (terminal state, missing copy) so the caller can fall back to the
-/// `todo_steps` derivation.
-private func thinkingLabel(for activity: AgentActivity) -> String? {
-    guard activity.isRunning else { return nil }
+/// Returns `nil` when the snapshot isn't useful for a placeholder so
+/// the caller can fall back to the older `todo_steps` derivation.
+private func thinkingLabel(for activity: AgentActivity, todoIsActive: Bool) -> String? {
+    if todoIsActive, !activity.isRunning, activity.resolvedState != .paused {
+        return "Starting agent…"
+    }
+    guard activity.isRunning || activity.resolvedState == .paused else {
+        return nil
+    }
     let label = activity.primaryStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !label.isEmpty else { return nil }
+    if let secondary = activity.secondaryStatusText {
+        return "\(label) — \(secondary)"
+    }
     return label
 }
 

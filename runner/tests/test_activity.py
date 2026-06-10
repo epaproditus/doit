@@ -75,6 +75,33 @@ class CategorizeToolTests(unittest.TestCase):
     def test_tts_categorized_as_audio(self) -> None:
         self.assertEqual(_categorize_tool("text_to_speech"), "audio")
 
+    def test_browser_tools_categorized(self) -> None:
+        self.assertEqual(_categorize_tool("browser_navigate"), "browser")
+        self.assertEqual(_categorize_tool("browser_snapshot"), "browser")
+
+    def test_browse_terminal_call_categorized_as_browser(self) -> None:
+        self.assertEqual(
+            _categorize_tool("terminal", "Using terminal. browse open https://example.com --remote"),
+            "browser",
+        )
+
+    def test_browse_skill_terminal_call_categorized_as_browser(self) -> None:
+        self.assertEqual(
+            _categorize_tool("terminal", "Using terminal. browse skills find flights"),
+            "browser",
+        )
+        self.assertEqual(
+            _categorize_tool(
+                "terminal",
+                "Using terminal. python3 /opt/doit/hermes/scripts/sync_browse_skill.py --query flights",
+            ),
+            "browser",
+        )
+
+    def test_skill_tools_categorized_as_search(self) -> None:
+        self.assertEqual(_categorize_tool("skills_list"), "search")
+        self.assertEqual(_categorize_tool("skill_view"), "search")
+
     def test_unknown_categorized_as_unknown(self) -> None:
         self.assertEqual(_categorize_tool("mystery_tool"), "unknown")
         self.assertEqual(_categorize_tool(None), "unknown")
@@ -156,6 +183,38 @@ class AgentActivityServiceTests(unittest.TestCase):
         # The matching recent step should be completed now.
         completed = [s for s in result_snap.recent if s.completed_at is not None]
         self.assertEqual(len(completed), 1)
+
+    def test_browser_tool_started_has_browser_label(self) -> None:
+        svc = AgentActivityService()
+        snap = svc.observe(_started("browser_navigate", text="Using browser_navigate. url=https://example.com"))
+        assert snap is not None
+        self.assertEqual(snap.title, "Browsing the web")
+        self.assertEqual(snap.tool_category, "browser")
+        self.assertEqual(snap.detail, "url=https://example.com")
+
+    def test_terminal_browse_command_has_browser_label(self) -> None:
+        svc = AgentActivityService()
+        snap = svc.observe(
+            _started(
+                "terminal",
+                text="Using terminal. browse open https://example.com --remote",
+            )
+        )
+        assert snap is not None
+        self.assertEqual(snap.title, "Browsing the web")
+        self.assertEqual(snap.tool_category, "browser")
+
+    def test_browse_skill_terminal_command_has_skill_label(self) -> None:
+        svc = AgentActivityService()
+        snap = svc.observe(
+            _started(
+                "terminal",
+                text="Using terminal. browse skills find flights",
+            )
+        )
+        assert snap is not None
+        self.assertEqual(snap.title, "Finding browser skill")
+        self.assertEqual(snap.tool_category, "browser")
 
     def test_tool_issue_stays_running_not_failed(self) -> None:
         svc = AgentActivityService()

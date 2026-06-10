@@ -19,6 +19,9 @@ enum ArtifactKind: String, Codable, Sendable, CaseIterable {
     /// `todo-images` Supabase Storage bucket. Renders as an inline
     /// preview card with optional caption metadata.
     case image
+    /// Comparison / booking options (flights, hotels, events, movies, …).
+    /// One card renders every domain via `category` + `fields` in the payload.
+    case options
 }
 
 /// One user-visible deliverable produced by the agent — a created Google
@@ -58,6 +61,7 @@ struct TodoArtifact: Codable, Identifiable, Hashable, Sendable {
         case .text: return !(text ?? "").isEmpty
         case .audio: return audio != nil
         case .image: return image != nil
+        case .options: return optionsPayload != nil
         }
     }
 
@@ -176,6 +180,14 @@ struct TodoArtifact: Codable, Identifiable, Hashable, Sendable {
             durationSeconds: duration,
             byteSize: byteSize
         )
+    }
+
+    // MARK: - options
+
+    /// Parsed comparison / booking list (`kind == .options`).
+    var optionsPayload: OptionsPayload? {
+        guard kind == .options else { return nil }
+        return OptionsPayload(json: payload)
     }
 
     // MARK: - image
@@ -356,6 +368,15 @@ extension TodoArtifact {
             if let ref = image {
                 return "image|\(ref.storagePath)"
             }
+        case .options:
+            if let payload = optionsPayload {
+                return [
+                    "options",
+                    Self.normalized(payload.category ?? ""),
+                    Self.normalized(payload.summary ?? ""),
+                    payload.selectedID ?? ""
+                ].joined(separator: "|")
+            }
         }
 
         return "\(kind.rawValue)|\(artifact_key)"
@@ -406,6 +427,9 @@ extension TodoArtifact {
         }
         for artifact in emails {
             add(artifact.emailProvider)
+        }
+        for artifact in primary where artifact.kind == .options {
+            add(artifact.optionsPayload?.provider)
         }
         return result
     }

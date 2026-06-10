@@ -47,6 +47,7 @@ doit/
 | Cloud VM provider (Hetzner / DigitalOcean) | runs Hermes + runner | needed |
 | Nous Portal | LLM + Hermes built-in tools | needed |
 | Composio | OAuth integrations (Gmail, etc.) | needed |
+| Browserbase | managed browser sessions for Hermes + browse.sh skills | needed for browser automation |
 
 See `hermes/setup.md` for provisioning the VM and `supabase/README.md` for the
 managed-side setup.

@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from .browse_skill import maybe_prefetch_browse_skill
 from .config import Config, load
 from .db import AgentModelSetting, DB
 from .activity import AgentActivityService, ActivitySnapshot
@@ -36,6 +37,7 @@ from .memory_extraction import (
     MEMORY_EXTRACT_INSTRUCTIONS,
     build_memory_extraction_prompt,
     parse_memory_extraction,
+    storage_status_for_extracted_memory,
 )
 from .memory_sync import (
     mirror_hermes_memory_to_supabase,
@@ -308,6 +310,19 @@ async def run_one_todo(
             connection_slug=connection_slug,
             attachment_urls=attachment_urls,
             pinned_memories=staged_memories,
+        )
+
+    browse_skill = await maybe_prefetch_browse_skill(cfg, todo, endpoint.profile_name)
+    if browse_skill:
+        skill_name = browse_skill.get("name") or "the installed browse.sh skill"
+        skill_slug = browse_skill.get("slug") or "unknown slug"
+        prompt = (
+            "Browse.sh preflight found a likely site-specific skill for this task: "
+            f"`{skill_name}` ({skill_slug}). Before saying a capability is unavailable, "
+            f"use skills_list and skill_view for `{skill_name}`, then follow that skill's "
+            "`browse ...` CLI workflow or Hermes browser tools. Do not use generic MCP "
+            "tool search as a substitute for this installed browse.sh skill.\n\n"
+            f"{prompt}"
         )
 
     hermes = HermesClient(endpoint)
@@ -1741,11 +1756,11 @@ async def _extract_memories_after_todo(
     settings = db.get_memory_settings(user_id)
     if settings.get("automatic_suggestions_enabled") is False:
         return
-    active_memories = db.list_active_memories_for_sync(user_id)
+    existing_memories = db.list_memories_for_extraction_context(user_id)
     prompt = build_memory_extraction_prompt(
         todo=todo,
         task_context=_task_context_for_prompt(db, todo_id),
-        existing_memories=active_memories,
+        existing_memories=existing_memories,
         custom_instructions=settings.get("custom_instructions"),
     )
 
@@ -1772,7 +1787,6 @@ async def _extract_memories_after_todo(
     if not candidates:
         return
     for candidate in candidates:
-        memory_status = "active" if candidate.should_auto_activate else "proposed"
         db.upsert_extracted_memory(
             user_id=user_id,
             target=candidate.target,
@@ -1781,7 +1795,7 @@ async def _extract_memories_after_todo(
             confidence=candidate.confidence,
             reason=candidate.reason,
             source_todo_id=todo_id,
-            memory_status=memory_status,
+            memory_status=storage_status_for_extracted_memory(candidate),
         )
     sync_active_memories_to_hermes(db, memory_store, user_id)
 

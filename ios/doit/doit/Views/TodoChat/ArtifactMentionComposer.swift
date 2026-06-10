@@ -92,6 +92,18 @@ extension ArtifactReference {
                 providerSlug: ref.provider,
                 url: ref.sourceURL
             )
+        case .options:
+            guard let payload = artifact.optionsPayload else { return nil }
+            let title = artifact.title ?? payload.summary ?? payload.categoryDisplayName
+            let url = payload.selectedID.flatMap { sid in
+                payload.items.first(where: { $0.id == sid })?.url
+            }
+            self = ArtifactReference(
+                id: artifact.id,
+                title: title,
+                providerSlug: payload.provider,
+                url: url
+            )
         }
     }
 }

@@ -45,6 +45,102 @@ This handles OAuth in a browser (use SSH port-forward if you're SSH'd in, or
 follow the paste-back instructions Hermes prints). One subscription covers the
 LLM plus Hermes' built-in web / image / TTS / browser tools.
 
+### Browserbase + browse.sh browser automation
+
+Doit uses Browserbase for managed cloud browser sessions and browse.sh for
+site-specific browser skills. Add your Browserbase credentials to the runner
+`.env` first:
+
+```bash
+cd /path/to/repo/runner
+read -rsp 'BROWSERBASE_API_KEY: ' BROWSERBASE_API_KEY; echo
+read -rsp 'BROWSERBASE_PROJECT_ID: ' BROWSERBASE_PROJECT_ID; echo
+{
+  printf '\n# Browserbase (Hermes browser automation + browse.sh CLI)\n'
+  printf 'BROWSERBASE_API_KEY=%s\n' "$BROWSERBASE_API_KEY"
+  printf 'BROWSERBASE_PROJECT_ID=%s\n' "$BROWSERBASE_PROJECT_ID"
+} >> .env
+unset BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID
+```
+
+Then copy those keys into the global Hermes env file. Hermes gateways read
+`~/.hermes/.env`; profile `.env` files are only for per-profile overrides.
+
+```bash
+cd /path/to/repo
+python3 hermes/scripts/sync_browserbase_env.py --restart
+```
+
+Install the browser CLIs Hermes will use. `browse` is the Browserbase-backed CLI
+referenced by browse.sh skills; `agent-browser` is Hermes' local sidecar for
+private/loopback URLs when hybrid routing is enabled.
+
+```bash
+# Node.js 20+ if not already present
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Optional but useful for private-URL hybrid routing through agent-browser.
+sudo apt install -y chromium-browser || true
+
+npm install -g browse
+npm install -g agent-browser
+
+browse --version
+agent-browser --version
+```
+
+Smoke-test Browserbase from a shell by sourcing the same env file Hermes reads.
+Stop any existing browse daemon first so it restarts with the Browserbase
+environment:
+
+```bash
+set -a; . ~/.hermes/.env; set +a
+browse stop --force || true
+browse open https://example.com --remote --timeout 45000
+browse get title --remote
+browse stop --force
+```
+
+Install the bundled `browse` CLI skill and Doit's browse.sh library guidance
+skill. The Doit runner deploy script copies `hermes/skills/` to the VM and
+installs those bundled skills into `~/.hermes/skills`, but first-time setup can
+do it manually too:
+
+```bash
+# Generic browse CLI guidance (creates ~/.agents/skills/browse, symlinked by
+# current Hermes installs into ~/.hermes/skills/browse).
+browse skills install
+
+mkdir -p ~/.hermes/skills
+rsync -av /opt/doit/hermes/skills/ ~/.hermes/skills/
+```
+
+Install site-specific browse.sh skills with Doit's bridge instead of the broken
+`hermes skills install browse-sh/...` source. It discovers catalog matches,
+downloads the skill files, writes them into `~/.hermes/skills/<skill-name>/`,
+and returns JSON for automation:
+
+```bash
+python3 /opt/doit/hermes/scripts/sync_browse_skill.py --query "cheap flights SFO JFK"
+python3 /opt/doit/hermes/scripts/sync_browse_skill.py --slug google.com/search-flights-ts4g1f
+```
+
+Verify a profile exposes the expected tools after its config is copied and the
+gateway restarts:
+
+```bash
+hermes -p <profile> tools list | grep -E 'browser|terminal|skills|delegation'
+hermes skills list | grep -E 'browse|browse-sh-library|search-flights|browserbase'
+```
+
+The template enables Hermes' `browser` and `terminal` toolsets so the agent can
+use native `browser_*` tools and execute `browse` CLI commands from browse.sh
+skills. This is a meaningful security expansion: keep Hermes running as an
+unprivileged user, keep profile `.env` files mode `600`, monitor Browserbase
+session usage, and avoid adding delegation or broad filesystem access without a
+separate review.
+
 ## 4. Create a Composio account
 
 1. Sign up at <https://composio.dev> and grab your API key from the dashboard.
@@ -353,6 +449,12 @@ cp .env.example .env  # fill in SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, APNS_*
 # OPENAI_API_KEY=sk-proj-...
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENROUTER_API_KEY=sk-or-v1-...
+# Add Browserbase keys, then sync them to ~/.hermes/.env:
+# BROWSERBASE_API_KEY=bb_live_...
+# BROWSERBASE_PROJECT_ID=...
+# Enable on-demand browse.sh preflight:
+# BROWSE_SKILL_AUTO_INSTALL=true
+# BROWSE_SKILL_INSTALL_TIMEOUT_SECS=30
 #
 # If the runner user needs sudo to restart per-user Hermes services, allow only
 # the hermes-* restart command in sudoers, then keep:
