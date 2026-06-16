@@ -15,6 +15,8 @@ Auth, database, Realtime, and Edge Functions for doit.
      "generate from key" helper with your Apple `.p8` Sign in with Apple key).
      For native iOS sign-in, include both the Services ID and app bundle ID in
      the Supabase Client IDs field, comma-separated, for example:
+     `com.newmaterial.doit.auth,com.newmaterial.doit` (Services ID + native app
+     bundle ID). Example with legacy IDs:
      `co.supabase.<project-ref>.auth,do.it.doit.app`.
 3. Apply the schema:
 

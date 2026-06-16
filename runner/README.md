@@ -99,7 +99,7 @@ Core values:
 | `BROWSE_SKILL_INSTALL_TIMEOUT_SECS` | Timeout for browse.sh skill discovery/install bridge commands |
 | `BROWSE_SKILL_MIN_CONFIDENCE` | Reserved threshold for future browse.sh ranking metadata; keep `0` today |
 | `BROWSE_SKILL_SYNC_SCRIPT` | Optional override for the bridge script path, defaulting to `/opt/doit/hermes/scripts/sync_browse_skill.py` in the VM layout |
-| `APNS_*` | Push notification credentials |
+| `APNS_*` | Push notification credentials — see [`docs/apns.md`](../docs/apns.md) for sandbox vs production |
 | `MAX_CONCURRENT_RUNS` | Worker pool size across all users (default 8; `1` reproduces the old strictly-sequential behavior) |
 | `MAX_RUNS_PER_USER` | Per-user cap so one user can't occupy the whole pool (default 2) |
 | `PROVISIONER_ENABLED` | Enables the in-process provisioner loop for invite-code onboarding (default true) |
