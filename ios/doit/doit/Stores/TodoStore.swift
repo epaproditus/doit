@@ -72,6 +72,23 @@ final class TodoStore {
     /// the next successful load. Per-row refresh failures only log.
     var loadError: String?
 
+    /// True while the first authoritative REST refresh for this app session
+    /// is in-flight. Cached rows may already be visible underneath.
+    var isInitialLoading = false
+
+    /// True while a background list refresh is reconciling visible cached or
+    /// previously-loaded rows.
+    var isRefreshing = false
+
+    /// Flips after the first successful REST-backed list load in this session.
+    private(set) var hasLoadedOnce = false
+
+    /// Timestamp of the last successful authoritative list refresh.
+    private(set) var lastSuccessfulLoadAt: Date?
+
+    /// Timestamp when the list was hydrated from a local snapshot, if any.
+    private(set) var hydratedFromCacheAt: Date?
+
     /// True while a row-level interaction response is in-flight. The list
     /// uses this to render the inline reply pill in a loading state.
     var respondingInteractionID: UUID?
@@ -116,7 +133,9 @@ final class TodoStore {
     /// Coalesces overlapping `loadAll()` calls from reconnect, scene-active,
     /// and pull-to-refresh so they don't race.
     private var loadAllTask: Task<Void, Never>?
+    private var snapshotSaveTask: Task<Void, Never>?
     private weak var connectivity: ConnectivityMonitor?
+    private let foregroundRefreshMinimumInterval: TimeInterval = 20
 
     // MARK: - Lifecycle
 
@@ -129,6 +148,7 @@ final class TodoStore {
         stop()
         self.userID = userID
         self.connectivity = connectivity
+        hydrateSnapshot(for: userID)
 
         TodoRealtimeHub.startUserFeed(
             userID: userID,
@@ -150,6 +170,8 @@ final class TodoStore {
         connectivity = nil
         loadAllTask?.cancel()
         loadAllTask = nil
+        snapshotSaveTask?.cancel()
+        snapshotSaveTask = nil
         liveActivityManager.endAll()
         userID = nil
         todos = []
@@ -169,6 +191,11 @@ final class TodoStore {
         pendingSurfaceWatchTask = nil
         cronHandoffRevision = 0
         loadError = nil
+        isInitialLoading = false
+        isRefreshing = false
+        hasLoadedOnce = false
+        lastSuccessfulLoadAt = nil
+        hydratedFromCacheAt = nil
     }
 
     // MARK: - Reads
@@ -236,7 +263,67 @@ final class TodoStore {
         // is small. They'll be evicted naturally on `stop()`.
     }
 
+    // MARK: - Snapshot cache
+
+    private func hydrateSnapshot(for userID: UUID) {
+        guard let snapshot = TodoStoreSnapshotCache.load(userID: userID) else {
+            return
+        }
+        todos = snapshot.todos
+        cronJobs = snapshot.cronJobs
+        openInteractions = Dictionary(
+            uniqueKeysWithValues: snapshot.openInteractions.map { ($0.todo_id, $0) }
+        )
+        artifactsByTodoID = Dictionary(grouping: snapshot.artifacts, by: \.todo_id)
+        agentActivityByTodoID = Dictionary(
+            uniqueKeysWithValues: snapshot.agentActivities.map { ($0.todo_id, $0) }
+        )
+        memories = snapshot.memories
+        hydratedFromCacheAt = snapshot.savedAt
+        syncLiveActivities()
+        print("[store][snapshot] hydrated savedAt=\(snapshot.savedAt) todos=\(snapshot.todos.count) cron=\(snapshot.cronJobs.count)")
+    }
+
+    private func scheduleSnapshotSave() {
+        guard let userID, let snapshot = makeSnapshot() else { return }
+        snapshotSaveTask?.cancel()
+        snapshotSaveTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            TodoStoreSnapshotCache.save(snapshot, userID: userID)
+        }
+    }
+
+    private func makeSnapshot() -> TodoStoreSnapshotCache.Snapshot? {
+        guard userID != nil else { return nil }
+        return TodoStoreSnapshotCache.Snapshot(
+            savedAt: Date(),
+            todos: todos,
+            cronJobs: cronJobs,
+            openInteractions: Array(openInteractions.values),
+            artifacts: artifactsByTodoID.values.flatMap { $0 },
+            agentActivities: Array(agentActivityByTodoID.values),
+            memories: memories
+        )
+    }
+
     // MARK: - Full refresh
+
+    private func beginLoadAll() {
+        let hasVisibleSnapshot = !todos.isEmpty || !cronJobs.isEmpty
+        if !hasLoadedOnce {
+            isInitialLoading = true
+        }
+        isRefreshing = hasLoadedOnce || hasVisibleSnapshot
+    }
+
+    private func finishLoadAll(didLoad: Bool) {
+        isInitialLoading = false
+        isRefreshing = false
+        if didLoad {
+            hydratedFromCacheAt = nil
+        }
+    }
 
     /// Full reload from REST. Used on `start()`, scene activation, and as a
     /// fallback when the realtime hub reports an unidentified change.
@@ -245,12 +332,24 @@ final class TodoStore {
             await existing.value
             return
         }
+        beginLoadAll()
         let task = Task { @MainActor in
-            await performLoadAll()
+            let didLoad = await performLoadAll()
+            finishLoadAll(didLoad: didLoad)
         }
         loadAllTask = task
         await task.value
         loadAllTask = nil
+    }
+
+    /// Foreground catch-up that avoids kicking off another full REST refresh
+    /// when the app just became active after a very recent successful load.
+    func refreshForForeground() async {
+        if let lastSuccessfulLoadAt,
+           Date().timeIntervalSince(lastSuccessfulLoadAt) < foregroundRefreshMinimumInterval {
+            return
+        }
+        await loadAll()
     }
 
     /// Refresh everything the list card needs for one todo: row, live
@@ -282,7 +381,7 @@ final class TodoStore {
         }
     }
 
-    private func performLoadAll() async {
+    private func performLoadAll() async -> Bool {
         do {
             async let todosTask = TodosAPI.list()
             async let cronTask: [CronJob] = (try? await CronJobsAPI.list()) ?? []
@@ -299,11 +398,16 @@ final class TodoStore {
             for id in trackedTodoIDs {
                 await refreshInteractions(for: id)
             }
+            hasLoadedOnce = true
+            lastSuccessfulLoadAt = Date()
+            scheduleSnapshotSave()
+            return true
         } catch {
             print("[store] loadAll failed: \(error)")
             if connectivity?.reportFailure(error) != true {
                 loadError = "Couldn't load todos: \(error.localizedDescription)"
             }
+            return false
         }
     }
 
@@ -341,6 +445,7 @@ final class TodoStore {
             } else {
                 openInteractions.removeValue(forKey: todoID)
             }
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshOpenInteraction(\(todoID)) failed: \(error)")
         }
@@ -355,6 +460,7 @@ final class TodoStore {
             } else {
                 artifactsByTodoID[todoID] = filtered
             }
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshArtifacts(\(todoID)) failed: \(error)")
         }
@@ -381,6 +487,7 @@ final class TodoStore {
             } else {
                 openInteractions.removeValue(forKey: todoID)
             }
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshInteractions(\(todoID)) failed: \(error)")
         }
@@ -400,6 +507,7 @@ final class TodoStore {
                 print("[store] refreshAgentActivity todo=\(todoID) not found; clearing")
                 agentActivityByTodoID.removeValue(forKey: todoID)
             }
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshAgentActivity(\(todoID)) failed: \(error)")
         }
@@ -432,10 +540,12 @@ final class TodoStore {
             .map(\.id)
         guard !ids.isEmpty else {
             openInteractions = [:]
+            scheduleSnapshotSave()
             return
         }
         do {
             openInteractions = try await TodosAPI.openInteractions(for: ids)
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshAllOpenInteractions failed: \(error)")
         }
@@ -445,11 +555,13 @@ final class TodoStore {
         let ids = todos.map(\.id)
         guard !ids.isEmpty else {
             artifactsByTodoID = [:]
+            scheduleSnapshotSave()
             return
         }
         do {
             let raw = try await TodosAPI.artifacts(for: ids)
             artifactsByTodoID = raw.mapValues { $0.filter(\.hasContent) }
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshAllArtifacts failed: \(error)")
         }
@@ -459,10 +571,12 @@ final class TodoStore {
         let ids = todos.map(\.id)
         guard !ids.isEmpty else {
             agentActivityByTodoID = [:]
+            scheduleSnapshotSave()
             return
         }
         do {
             agentActivityByTodoID = try await TodosAPI.agentActivities(for: ids)
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshAllAgentActivities failed: \(error)")
         }
@@ -471,6 +585,7 @@ final class TodoStore {
     func refreshMemories() async {
         do {
             memories = try await MemoriesAPI.list().filter(\.isVisibleMemory)
+            scheduleSnapshotSave()
         } catch {
             print("[store] refreshMemories failed: \(error)")
         }
@@ -701,6 +816,7 @@ final class TodoStore {
         if openInteractions[todoID]?.id == interactionID {
             openInteractions.removeValue(forKey: todoID)
         }
+        scheduleSnapshotSave()
     }
 
     // MARK: - Cron mutations
@@ -814,6 +930,7 @@ final class TodoStore {
             // can still detect "row vanished" and switch sections.
             clearPendingNewTodo()
         }
+        scheduleSnapshotSave()
     }
 
     private func clearPendingNewTodo() {
@@ -829,6 +946,8 @@ final class TodoStore {
     private func patchTodoLocal(id: UUID, _ mutate: (inout Todo) -> Void) {
         guard let idx = todos.firstIndex(where: { $0.id == id }) else { return }
         mutate(&todos[idx])
+        syncLiveActivities()
+        scheduleSnapshotSave()
     }
 
     private func removeTodoLocal(id: UUID, clearPendingIfNoCandidate: Bool = false) {
@@ -837,6 +956,7 @@ final class TodoStore {
         artifactsByTodoID.removeValue(forKey: id)
         interactionsByTodoID.removeValue(forKey: id)
         agentActivityByTodoID.removeValue(forKey: id)
+        syncLiveActivities()
         if id == pendingNewTodoID {
             // A manual delete of the pending prep card is not a cron handoff.
             // Clear the marker so the list doesn't keep reconciling a row that
@@ -853,6 +973,7 @@ final class TodoStore {
         } else {
             notifyCronHandoffIfNeeded()
         }
+        scheduleSnapshotSave()
     }
 
     private func startPendingCronHandoffGraceWindow(for id: UUID) {
@@ -884,15 +1005,18 @@ final class TodoStore {
             cronJobs.sort { $0.created_at > $1.created_at }
         }
         notifyCronHandoffIfNeeded()
+        scheduleSnapshotSave()
     }
 
     private func patchCronJobLocal(id: UUID, _ mutate: (inout CronJob) -> Void) {
         guard let idx = cronJobs.firstIndex(where: { $0.id == id }) else { return }
         mutate(&cronJobs[idx])
+        scheduleSnapshotSave()
     }
 
     private func removeCronJobLocal(id: UUID) {
         cronJobs.removeAll { $0.id == id }
+        scheduleSnapshotSave()
     }
 
     private func upsertMemory(_ memory: AgentMemory) {
@@ -902,15 +1026,18 @@ final class TodoStore {
             memories.append(memory)
         }
         memories = memories.filter(\.isVisibleMemory).sorted { $0.updated_at > $1.updated_at }
+        scheduleSnapshotSave()
     }
 
     private func patchMemoryLocal(id: UUID, _ mutate: (inout AgentMemory) -> Void) {
         guard let idx = memories.firstIndex(where: { $0.id == id }) else { return }
         mutate(&memories[idx])
+        scheduleSnapshotSave()
     }
 
     private func removeMemoryLocal(id: UUID) {
         memories.removeAll { $0.id == id }
+        scheduleSnapshotSave()
     }
 
     private func recoverCronJobAfterRealtimeMiss(id: UUID) async {
@@ -979,6 +1106,7 @@ final class TodoStore {
                             realtimeActivity,
                             existing: self.agentActivityByTodoID[todoID]
                         )
+                        self.scheduleSnapshotSave()
                     }
                 } else {
                     print("[store] realtime activity todo=\(todoID) missing payload; fetching")
@@ -988,6 +1116,7 @@ final class TodoStore {
             onAgentActivityDelete: { [weak self] todoID in
                 await MainActor.run {
                     _ = self?.agentActivityByTodoID.removeValue(forKey: todoID)
+                    self?.scheduleSnapshotSave()
                 }
             },
             onMemoryChange: { [weak self] id in

@@ -84,6 +84,7 @@ struct CronJobDetailView: View {
             }
         )
         .toolbar(.hidden, for: .navigationBar)
+        .interactivePopGestureEnabled()
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .task(id: jobID) {
             // The cron job row lives in the user-feed store. We only need

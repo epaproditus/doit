@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct SuggestedCategory: Identifiable, Hashable {
     let id: String
@@ -581,52 +580,19 @@ enum SuggestedCategoryCatalog {
 
 struct SuggestedCategoryStrip: View {
     let categories: [SuggestedCategory]
-    let screenWidth: CGFloat
     var onSelect: ((SuggestedCategory) -> Void)? = nil
-    @Binding var centeredCategoryID: String?
 
     private let spacing: CGFloat = 8
-    private let horizontalContentInset: CGFloat = 16
-    /// Approximate width for snap margins; pills are variable width.
-    private let snapReferenceWidth: CGFloat = 108
-
-    private var viewportWidth: CGFloat {
-        max(0, screenWidth - horizontalContentInset * 2)
-    }
-
-    private var leftSnapMargin: CGFloat {
-        max(0, min(2, viewportWidth - snapReferenceWidth))
-    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: spacing) {
                 ForEach(categories) { category in
                     categoryContent(category)
-                        .id(category.id)
                 }
             }
-            .scrollTargetLayout()
         }
-        .contentMargins(.leading, leftSnapMargin, for: .scrollContent)
-        .contentMargins(.trailing, max(0, viewportWidth - snapReferenceWidth - leftSnapMargin), for: .scrollContent)
         .scrollClipDisabled()
-        .scrollPosition(id: $centeredCategoryID)
-        .scrollTargetBehavior(.viewAligned)
-        .onAppear {
-            if centeredCategoryID == nil || !categories.contains(where: { $0.id == centeredCategoryID }) {
-                centeredCategoryID = categories.first?.id
-            }
-        }
-        .onChange(of: categories.map(\.id)) { _, ids in
-            if centeredCategoryID == nil || !ids.contains(centeredCategoryID ?? "") {
-                centeredCategoryID = ids.first
-            }
-        }
-        .onChange(of: centeredCategoryID) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, oldValue != newValue else { return }
-            UISelectionFeedbackGenerator().selectionChanged()
-        }
     }
 
     @ViewBuilder

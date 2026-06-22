@@ -38,8 +38,6 @@ struct TodoListView: View {
     @State private var scrubbedSectionID: Int?
     @State private var navigationPath = NavigationPath()
     @State private var deletingTodoIDs: Set<UUID> = []
-    @State private var centeredSuggestedTaskID: String?
-    @State private var centeredSuggestedCronID: String?
     @State private var selectedScheduledPromptCategoryID: String?
     @State private var scheduledPromptPickerIsVisible = false
     @State private var scheduledPromptPickerDragOffset: CGFloat = 0
@@ -60,6 +58,7 @@ struct TodoListView: View {
     @State private var exploreApiKeyError: String?
     @State private var activeCronHandoff: CronHandoff?
     @State private var completedCronHandoffGeometryIDs: Set<String> = []
+    @State private var isPullRefreshing = false
     @StateObject private var locationProvider = LocationProvider()
     @Namespace private var taskCardNamespace
 
@@ -148,7 +147,7 @@ struct TodoListView: View {
                     print("[list] scenePhase \(oldPhase)→\(newPhase)")
                     guard newPhase == .active else { return }
                     Task {
-                        await store.loadAll()
+                        await store.refreshForForeground()
                         await refreshConnectionsPromoState()
                     }
                 }
@@ -335,62 +334,69 @@ struct TodoListView: View {
     private var tasksSectionPage: some View {
         let activeItems = activeTodos
         let completedItems = completedTodos
-        return GeometryReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    if let loadError = store.loadError {
-                        Text(loadError)
-                            .foregroundStyle(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+        let shouldShowInitialSkeleton = store.isInitialLoading && activeItems.isEmpty && completedItems.isEmpty
+        return ZStack(alignment: .top) {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        if let loadError = store.loadError {
+                            Text(loadError)
+                                .foregroundStyle(.red)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if shouldShowInitialSkeleton {
+                            TaskListLoadingSkeleton()
+                        } else {
+                            ForEach(activeItems) { todo in
+                                todoCard(for: todo)
+                            }
+
+                            TaskSectionHeader(title: "Suggested", verticalPadding: 0)
+                                .padding(.top, 6)
+
+                            SuggestedCategoryStrip(
+                                categories: SuggestedCategoryCatalog.taskCategories
+                            )
+                            .padding(.bottom, 2)
+
+                            if shouldShowConnectionsPromo {
+                                ExploreConnectionsPromoCard(
+                                    onSetup: {
+                                        dismissConnectionsPromo()
+                                        presentSettings(route: .connections)
+                                    },
+                                    onDismiss: dismissConnectionsPromo
+                                )
+                                .padding(.top, 10)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+
+                            completedTasksSection(completedItems)
+                                .padding(.top, 2)
+                        }
                     }
-
-                    ForEach(activeItems) { todo in
-                        todoCard(for: todo)
-                    }
-
-                    TaskSectionHeader(title: "Suggested", verticalPadding: 0)
-                        .padding(.top, 6)
-
-                    SuggestedCategoryStrip(
-                        categories: SuggestedCategoryCatalog.taskCategories,
-                        screenWidth: proxy.size.width,
-                        centeredCategoryID: $centeredSuggestedTaskID
-                    )
-                    .padding(.bottom, 2)
-
-                    if shouldShowConnectionsPromo {
-                        ExploreConnectionsPromoCard(
-                            onSetup: {
-                                dismissConnectionsPromo()
-                                presentSettings(route: .connections)
-                            },
-                            onDismiss: dismissConnectionsPromo
-                        )
-                        .padding(.top, 10)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-
-                    completedTasksSection(completedItems)
-                        .padding(.top, 2)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 116)
+                    .padding(.bottom, DockStyle.scrollBottomInset)
+                    .animation(.smooth(duration: 0.34), value: taskLayoutSignature)
+                    .animation(.smooth(duration: 0.34), value: shouldShowConnectionsPromo)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 116)
-                .padding(.bottom, DockStyle.scrollBottomInset)
-                .animation(.smooth(duration: 0.34), value: taskLayoutSignature)
-                .animation(.smooth(duration: 0.34), value: shouldShowConnectionsPromo)
-            }
-            .refreshable {
-                await store.loadAll()
+                .refreshable {
+                    await refreshTaskListFromPull()
+                }
+
+                if isPullRefreshing {
+                    PullRefreshSpinner()
+                        .padding(.top, PullRefreshSpinnerStyle.topPadding)
+                }
             }
             .onChange(of: store.todos.isEmpty) { wasEmpty, isEmpty in
                 guard isEmpty, !wasEmpty else { return }
-                centeredSuggestedTaskID = nil
                 selectedCompletedActivityFilter = .allActivity
             }
             .task {
                 await loadExploreToolkits(showSpinner: false)
             }
-        }
     }
 
     @ViewBuilder
@@ -437,8 +443,10 @@ struct TodoListView: View {
             Group {
                 switch selectedCompletedActivityFilter {
                 case .allActivity:
-                    ForEach(completedItems) { todo in
-                        todoCard(for: todo, identityScope: CompletedActivityFilter.allActivity.rawValue)
+                    VStack(spacing: 10) {
+                        ForEach(completedItems) { todo in
+                            todoCard(for: todo, identityScope: CompletedActivityFilter.allActivity.rawValue)
+                        }
                     }
                 case .topics:
                     let summaries = activityGroupSummaries(from: completedItems)
@@ -457,9 +465,17 @@ struct TodoListView: View {
                     }
                 }
             }
-            .animation(.smooth(duration: 0.34), value: selectedCompletedActivityFilter)
+            .id(selectedCompletedActivityFilter.rawValue)
+            .transition(activityToggleTransition)
         }
         .padding(.top, 6)
+    }
+
+    private var activityToggleTransition: AnyTransition {
+        .asymmetric(
+            insertion: .scale(scale: 0.96, anchor: .center).combined(with: .opacity),
+            removal: .scale(scale: 0.98, anchor: .center).combined(with: .opacity)
+        )
     }
 
     @ViewBuilder
@@ -526,40 +542,46 @@ struct TodoListView: View {
     }
 
     private var exploreSectionPage: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 16) {
-                if let exploreError {
-                    Text(exploreError)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                PassbookUserContactCard(
-                    initials: auth.initials,
-                    displayName: auth.displayName,
-                    avatarImageData: auth.avatarImageData,
-                    avatarURL: auth.avatarURL,
-                    joinedAt: auth.joinedAt,
-                    locationText: locationProvider.displayLocationText,
-                    onLocationTap: handlePassbookLocationTap
-                )
-
-                PassbookMemorySection(
-                    memories: passbookMemories,
-                    onSelect: { memory in
-                        print("[passbook][memory] selected row id=\(memory.id) title=\(memory.title)")
-                        presentMemoryDetail(memory)
+        ZStack(alignment: .top) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if let exploreError {
+                        Text(exploreError)
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                )
 
+                    PassbookUserContactCard(
+                        initials: auth.initials,
+                        displayName: auth.displayName,
+                        avatarImageData: auth.avatarImageData,
+                        avatarURL: auth.avatarURL,
+                        joinedAt: auth.joinedAt,
+                        locationText: locationProvider.displayLocationText,
+                        onLocationTap: handlePassbookLocationTap
+                    )
+
+                    PassbookMemorySection(
+                        memories: passbookMemories,
+                        onSelect: { memory in
+                            print("[passbook][memory] selected row id=\(memory.id) title=\(memory.title)")
+                            presentMemoryDetail(memory)
+                        }
+                    )
+
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 116)
+                .padding(.bottom, DockStyle.scrollBottomInset)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 116)
-            .padding(.bottom, DockStyle.scrollBottomInset)
-        }
-        .refreshable {
-            locationProvider.refreshIfAuthorized()
-            await store.refreshMemories()
+            .refreshable {
+                await refreshExploreFromPull()
+            }
+
+            if isPullRefreshing {
+                PullRefreshSpinner()
+                    .padding(.top, PullRefreshSpinnerStyle.topPadding)
+            }
         }
     }
 
@@ -571,77 +593,83 @@ struct TodoListView: View {
     }
 
     private var scheduledSectionPage: some View {
-        GeometryReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    if let loadError = store.loadError {
-                        Text(loadError)
-                            .foregroundStyle(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+        ZStack(alignment: .top) {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        if let loadError = store.loadError {
+                            Text(loadError)
+                                .foregroundStyle(.red)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
 
-                    TaskSectionHeader(title: "Suggested", verticalPadding: 0)
-                        .padding(.top, 6)
+                        TaskSectionHeader(title: "Suggested", verticalPadding: 0)
+                            .padding(.top, 6)
 
-                    SuggestedCategoryStrip(
-                        categories: SuggestedCategoryCatalog.scheduledCategories,
-                        screenWidth: proxy.size.width,
-                        onSelect: handleScheduledCategorySelection,
-                        centeredCategoryID: $centeredSuggestedCronID
-                    )
-                    .padding(.bottom, 2)
+                        SuggestedCategoryStrip(
+                            categories: SuggestedCategoryCatalog.scheduledCategories,
+                            onSelect: handleScheduledCategorySelection
+                        )
+                        .padding(.bottom, 2)
 
-                    if store.cronJobs.isEmpty && store.loadError == nil {
-                        EmptyState(section: .scheduled)
-                            .padding(.top, 8)
-                    } else if !store.cronJobs.isEmpty {
-                        LazyVGrid(
-                            columns: [
-                                GridItem(.flexible(), spacing: 10),
-                                GridItem(.flexible(), spacing: 10)
-                            ],
-                            spacing: 10
-                        ) {
-                            ForEach(store.cronJobs) { job in
-                                CronJobCard(
-                                    job: job,
-                                    onOpen: {
-                                        playLightHaptic()
-                                        navigationPath.append(TodoListDestination.cronJob(job.id))
-                                    },
-                                    onTogglePause: {
-                                        playLightHaptic()
-                                        Task { await store.toggleCronPause(job) }
-                                    },
-                                    onDelete: { Task { await store.deleteCronJob(job.id) } }
-                                )
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .modifier(
-                                    OptionalMatchedGeometryEffect(
-                                        id: cronHandoffGeometryID(forCronJob: job.id),
-                                        namespace: taskCardNamespace,
-                                        isSource: false
+                        if store.isInitialLoading && store.cronJobs.isEmpty {
+                            TaskListLoadingSkeleton()
+                                .padding(.top, 8)
+                        } else if store.cronJobs.isEmpty && store.loadError == nil {
+                            EmptyState(section: .scheduled)
+                                .padding(.top, 8)
+                        } else if !store.cronJobs.isEmpty {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(.flexible(), spacing: 10),
+                                    GridItem(.flexible(), spacing: 10)
+                                ],
+                                spacing: 10
+                            ) {
+                                ForEach(store.cronJobs) { job in
+                                    CronJobCard(
+                                        job: job,
+                                        onOpen: {
+                                            playLightHaptic()
+                                            navigationPath.append(TodoListDestination.cronJob(job.id))
+                                        },
+                                        onTogglePause: {
+                                            playLightHaptic()
+                                            Task { await store.toggleCronPause(job) }
+                                        },
+                                        onDelete: { Task { await store.deleteCronJob(job.id) } }
                                     )
-                                )
-                                .id(cronJobRefreshID(for: job))
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        Task { await store.deleteCronJob(job.id) }
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                                    .modifier(
+                                        OptionalMatchedGeometryEffect(
+                                            id: cronHandoffGeometryID(forCronJob: job.id),
+                                            namespace: taskCardNamespace,
+                                            isSource: false
+                                        )
+                                    )
+                                    .id(cronJobRefreshID(for: job))
+                                    .contextMenu {
+                                        Button(role: .destructive) {
+                                            Task { await store.deleteCronJob(job.id) }
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
                                     }
                                 }
                             }
+                            .padding(.top, 8)
                         }
-                        .padding(.top, 8)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 116)
+                    .padding(.bottom, DockStyle.scrollBottomInset)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 116)
-                .padding(.bottom, DockStyle.scrollBottomInset)
+                .refreshable { await refreshTaskListFromPull() }
+
+                if isPullRefreshing {
+                    PullRefreshSpinner()
+                        .padding(.top, PullRefreshSpinnerStyle.topPadding)
+                }
             }
-            .refreshable { await store.loadAll() }
-        }
     }
 
     private var bottomControls: some View {
@@ -753,9 +781,11 @@ struct TodoListView: View {
 
     private func toggleCompletedActivityView() {
         playSectionHaptic()
-        selectedCompletedActivityFilter = selectedCompletedActivityFilter == .allActivity
-            ? .topics
-            : .allActivity
+        withAnimation(.smooth(duration: 0.22)) {
+            selectedCompletedActivityFilter = selectedCompletedActivityFilter == .allActivity
+                ? .topics
+                : .allActivity
+        }
     }
 
     private func playLightHaptic() {
@@ -1012,19 +1042,26 @@ struct TodoListView: View {
                     dismissActivityGroupDetail()
                 }
             )
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    ForEach(todos) { todo in
-                        todoCard(for: todo) {
-                            openTodoFromActivityGroup(todo)
+            ZStack(alignment: .top) {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(todos) { todo in
+                            todoCard(for: todo) {
+                                openTodoFromActivityGroup(todo)
+                            }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, DockStyle.scrollBottomInset)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, DockStyle.scrollBottomInset)
+                .refreshable { await refreshTaskListFromPull() }
+
+                if isPullRefreshing {
+                    PullRefreshSpinner()
+                        .padding(.top, 18)
+                }
             }
-            .refreshable { await store.loadAll() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSemanticColors.surface)
@@ -1067,6 +1104,25 @@ struct TodoListView: View {
 
     private func playSectionHaptic() {
         UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    private func refreshTaskListFromPull() async {
+        await performPullRefresh {
+            await store.loadAll()
+        }
+    }
+
+    private func refreshExploreFromPull() async {
+        await performPullRefresh {
+            locationProvider.refreshIfAuthorized()
+            await store.refreshMemories()
+        }
+    }
+
+    private func performPullRefresh(_ operation: () async -> Void) async {
+        isPullRefreshing = true
+        defer { isPullRefreshing = false }
+        await operation()
     }
 
     private var activeTodos: [Todo] {
@@ -1479,7 +1535,7 @@ struct TodoListView: View {
             .joined(separator: ",")
         let activitySig: String
         if let activity = store.agentActivityByTodoID[todo.id] {
-            activitySig = activity.activitySignature
+            activitySig = activity.activityContentSignature
         } else {
             activitySig = ""
         }
@@ -1487,6 +1543,7 @@ struct TodoListView: View {
             todo.id.uuidString,
             todo.status.rawValue,
             todo.title,
+            todo.original_title ?? "",
             todo.connection_slug ?? "",
             artifactSig,
             activitySig,
@@ -3067,6 +3124,7 @@ private struct ActivityGroupGrid: View {
                 ActivityGroupTile(summary: summary) {
                     onSelect(summary.descriptor)
                 }
+                .transition(.scale(scale: 0.94, anchor: .center).combined(with: .opacity))
             }
         }
     }
@@ -3260,7 +3318,7 @@ private struct MorphComposerHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+        value = nextValue()
     }
 }
 
@@ -3280,11 +3338,10 @@ private struct AddTodoMorphOverlay: View {
     private let fabSize: CGFloat = 52
     private let panelMinWidth: CGFloat = 360
     private let panelCornerRadius: CGFloat = 34
-    /// Fallback until the morph shell measures `AddTodoView` on first expand frame.
-    private let estimatedExpandedHeight: CGFloat = 290
     private let leadingInset: CGFloat = 14
     private let trailingInset: CGFloat = 14
     private let expandedBottomInset: CGFloat = 12
+    private let expandedTopMargin: CGFloat = 12
     private let keyboardGapAboveKeyboard: CGFloat = 8
     private let fabGapAboveDock: CGFloat = 12
     /// Matches `DockStyle` bar padding + button height (8 + 40 + 4).
@@ -3303,11 +3360,27 @@ private struct AddTodoMorphOverlay: View {
         AddTodoComposerMotion.morph
     }
 
-    private var expandedShellHeight: CGFloat {
+    private func maxExpandedShellHeight(in proxy: GeometryProxy) -> CGFloat {
+        let topInset = SafeAreaInsetsKey.defaultValue.top
+        let bottomPadding = composerBottomPadding(expanded: true)
+        return max(
+            fabSize,
+            proxy.size.height - topInset - expandedTopMargin - bottomPadding
+        )
+    }
+
+    private func expandedShellHeight(panelWidth: CGFloat, maxShellHeight: CGFloat) -> CGFloat {
+        let contentHeight: CGFloat
         if measuredContentHeight > fabSize {
-            return measuredContentHeight
+            contentHeight = measuredContentHeight
+        } else {
+            contentHeight = AddTodoView.estimatedMorphComposerHeight(
+                for: presentation?.title ?? "",
+                panelWidth: panelWidth,
+                maxComposerHeight: maxShellHeight
+            )
         }
-        return estimatedExpandedHeight
+        return min(contentHeight, maxShellHeight)
     }
 
     var body: some View {
@@ -3322,8 +3395,9 @@ private struct AddTodoMorphOverlay: View {
             GeometryReader { proxy in
                 let availableWidth = proxy.size.width - leadingInset - trailingInset
                 let panelWidth = max(panelMinWidth, availableWidth)
+                let maxShellHeight = maxExpandedShellHeight(in: proxy)
                 let shellWidth = isExpanded ? panelWidth : fabSize
-                let shellHeight = isExpanded ? expandedShellHeight : fabSize
+                let shellHeight = isExpanded ? expandedShellHeight(panelWidth: panelWidth, maxShellHeight: maxShellHeight) : fabSize
                 let shellCornerRadius = isExpanded ? panelCornerRadius : fabSize / 2
 
                 VStack {
@@ -3344,6 +3418,7 @@ private struct AddTodoMorphOverlay: View {
                                             initialTitle: presentation.title,
                                             initialAction: presentation.action,
                                             presentation: .morphShell,
+                                            maxComposerHeight: maxShellHeight,
                                             onCancel: onDismiss,
                                             onCreated: onCreated
                                         )
@@ -3409,7 +3484,6 @@ private struct AddTodoMorphOverlay: View {
             .ignoresSafeArea(.keyboard, edges: .bottom)
         }
         .animation(morphAnimation, value: isExpanded)
-        .animation(morphAnimation, value: expandedShellHeight)
         .animation(AddTodoComposerMotion.backdrop, value: isExpanded)
         .animation(.smooth(duration: 0.25), value: keyboardOverlap)
         .onPreferenceChange(MorphComposerHeightKey.self) { height in
@@ -3428,11 +3502,13 @@ private struct AddTodoMorphOverlay: View {
                 return
             }
             keyboardOverlap = visibleKeyboardOverlap(from: note)
+            measuredContentHeight = 0
         }
         .onReceive(
             NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
         ) { _ in
             keyboardOverlap = 0
+            measuredContentHeight = 0
         }
         .onChange(of: isExpanded) { _, expanded in
             if expanded {
@@ -3715,6 +3791,7 @@ private struct TodoCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentShape(Rectangle())
+                .id(displayTitle)
         }
         .buttonStyle(.plain)
     }
@@ -3746,10 +3823,35 @@ private struct TodoCard: View {
     }
 
     private var displayTitle: String {
-        // While the preparation pass is still running the rewritten title
-        // doesn't exist yet, so we show the user's raw input. After prep,
-        // `title` is the concise version and `original_title` is the raw.
-        todo.title
+        if titleStillLooksUnprepared, let prepared = preparedSummaryText {
+            return prepared
+        }
+        return trimmedTitle ?? "Task"
+    }
+
+    private var titleStillLooksUnprepared: Bool {
+        guard let title = trimmedTitle else { return true }
+        guard let original = trimmedOriginalTitle else {
+            return todo.status.isActive && preparedSummaryText != nil
+        }
+        return title.caseInsensitiveCompare(original) == .orderedSame
+    }
+
+    private var trimmedTitle: String? {
+        nonEmptyTrimmed(todo.title)
+    }
+
+    private var trimmedOriginalTitle: String? {
+        nonEmptyTrimmed(todo.original_title)
+    }
+
+    private var preparedSummaryText: String? {
+        nonEmptyTrimmed(todo.preparation_summary)
+    }
+
+    private func nonEmptyTrimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     @ViewBuilder
@@ -3816,10 +3918,16 @@ private struct TodoCard: View {
             if let activity, !activity.primaryStatusText.isEmpty {
                 return activity.primaryStatusText
             }
+            if let summary = preparedSummaryText {
+                return summary
+            }
             return "Queued to run..."
         case .running:
             if let activity, !activity.primaryStatusText.isEmpty {
                 return activity.primaryStatusText
+            }
+            if let summary = preparedSummaryText {
+                return summary
             }
             return "Working..."
         case .needs_auth: return "Connect an account to continue"
@@ -4095,7 +4203,7 @@ private enum TodoCardStyle {
     static let primaryBlue = Color(red: 0, green: 122 / 255, blue: 1)
     static let primaryBlueTint = Color(red: 0, green: 122 / 255, blue: 1).opacity(0.15)
     static let footerBackground = AppSemanticColors.footerSurface
-    static let cardCornerRadius: CGFloat = 30
+    static let cardCornerRadius: CGFloat = 34
     /// Green used for the completed-todo toggle (iOS system green).
     static let completedGreen = Color(red: 52 / 255, green: 199 / 255, blue: 89 / 255)
     /// Padding on all four sides of the card.
@@ -4369,6 +4477,74 @@ private struct SectionEmptyStateCard: View {
             SectionEmptyStateStyle.background,
             in: RoundedRectangle(cornerRadius: SectionEmptyStateStyle.cornerRadius, style: .continuous)
         )
+    }
+}
+
+private struct TaskListLoadingSkeleton: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ForEach(0..<3, id: \.self) { index in
+                TaskListSkeletonCard(index: index)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading tasks")
+    }
+}
+
+private enum PullRefreshSpinnerStyle {
+    static let topPadding: CGFloat = 122
+}
+
+private struct PullRefreshSpinner: View {
+    var body: some View {
+        ProgressView()
+            .controlSize(.large)
+            .tint(Color(.systemGray3))
+            .frame(width: 44, height: 44)
+            .accessibilityLabel("Refreshing")
+            .allowsHitTesting(false)
+    }
+}
+
+private struct TaskListSkeletonCard: View {
+    let index: Int
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Circle()
+                .fill(AppSemanticColors.neutralFill)
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 9) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(AppSemanticColors.neutralFill)
+                    .frame(width: titleWidth, height: 16)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(AppSemanticColors.neutralFill.opacity(0.82))
+                    .frame(width: subtitleWidth, height: 12)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+        .background(
+            AppSemanticColors.elevatedSurface,
+            in: RoundedRectangle(cornerRadius: TodoCardStyle.cardCornerRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: TodoCardStyle.cardCornerRadius, style: .continuous)
+                .stroke(AppSemanticColors.separator, lineWidth: 1)
+        }
+    }
+
+    private var titleWidth: CGFloat {
+        [190, 245, 165][index % 3]
+    }
+
+    private var subtitleWidth: CGFloat {
+        [128, 176, 148][index % 3]
     }
 }
 

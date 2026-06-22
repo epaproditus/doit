@@ -19,6 +19,7 @@ struct AddTodoView: View {
     let userID: UUID
     let presentation: AddTodoPresentationStyle
     let initialAction: AddTodoLaunchAction
+    let maxComposerHeight: CGFloat?
     let onCancel: () -> Void
     let onCreated: (Todo) -> Void
 
@@ -27,9 +28,18 @@ struct AddTodoView: View {
     private static let inlineCardCornerRadius: CGFloat = 34
     private static let inlineEditorCornerRadius: CGFloat = 16
     private static let inlineEditorMinHeight: CGFloat = 72
-    private static let morphEditorHeight: CGFloat = 200
+    private static let morphEditorMinHeight: CGFloat = 260
     private static let morphAccessoryRowHeight: CGFloat = 52
-    private static var morphTextAreaHeight: CGFloat { morphEditorHeight - morphAccessoryRowHeight }
+    private static var morphTextAreaMinHeight: CGFloat { morphEditorMinHeight - morphAccessoryRowHeight }
+    private static let morphPanelHorizontalInset: CGFloat = 14
+    private static let morphTextAreaHorizontalPadding: CGFloat = 20
+    private static let morphTextAreaMeasurementInset: CGFloat = 14
+    private static let morphTextAreaVerticalMeasurementPadding: CGFloat = 20
+    private static let morphTextAreaTopInset: CGFloat = 20
+    private static let morphTextAreaMaxScreenFraction: CGFloat = 0.30
+    private static let morphTextAreaAbsoluteMaxHeight: CGFloat = 200
+    private static let morphOverflowFadeHeight: CGFloat = 26
+    private static let morphComposerChromeHeightEstimate: CGFloat = 90
     private static let morphVoiceControlIdleHeight: CGFloat = 40
     private static let morphVoiceControlActiveHeight: CGFloat = 48
     private static let morphVoiceControlActiveInset: CGFloat = 8
@@ -63,12 +73,14 @@ struct AddTodoView: View {
         initialTitle: String = "",
         initialAction: AddTodoLaunchAction = .note,
         presentation: AddTodoPresentationStyle = .morphShell,
+        maxComposerHeight: CGFloat? = nil,
         onCancel: @escaping () -> Void = {},
         onCreated: @escaping (Todo) -> Void
     ) {
         self.userID = userID
         self.presentation = presentation
         self.initialAction = initialAction
+        self.maxComposerHeight = maxComposerHeight
         self.onCancel = onCancel
         self.onCreated = onCreated
         _title = State(initialValue: initialTitle)
@@ -103,6 +115,129 @@ struct AddTodoView: View {
 
     private var isTitleEmpty: Bool {
         title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static var morphTextMeasurementFont: UIFont {
+        let font = UIFont.systemFont(ofSize: 20, weight: .regular)
+        guard let descriptor = font.fontDescriptor.withDesign(.rounded) else {
+            return font
+        }
+        return UIFont(descriptor: descriptor, size: 20)
+    }
+
+    private static var defaultMorphPanelWidth: CGFloat {
+        max(360, UIScreen.main.bounds.width - (morphPanelHorizontalInset * 2))
+    }
+
+    static func estimatedMorphComposerHeight(
+        for title: String,
+        panelWidth: CGFloat = defaultMorphPanelWidth,
+        maxComposerHeight: CGFloat? = nil
+    ) -> CGFloat {
+        min(
+            morphEditorHeight(
+                for: title,
+                panelWidth: panelWidth,
+                maxComposerHeight: maxComposerHeight
+            ) + morphComposerChromeHeightEstimate,
+            maxComposerHeight ?? .greatestFiniteMagnitude
+        )
+    }
+
+    private func morphEditorHeight(for title: String, panelWidth: CGFloat) -> CGFloat {
+        Self.morphEditorHeight(
+            for: title,
+            panelWidth: panelWidth,
+            maxComposerHeight: maxComposerHeight
+        )
+    }
+
+    private func morphTextAreaHeight(for title: String, panelWidth: CGFloat) -> CGFloat {
+        Self.morphTextAreaHeight(
+            for: title,
+            panelWidth: panelWidth,
+            maxComposerHeight: maxComposerHeight
+        )
+    }
+
+    private func morphTextExceedsVisibleHeight(for title: String, panelWidth: CGFloat) -> Bool {
+        Self.morphTextExceedsVisibleHeight(
+            for: title,
+            panelWidth: panelWidth,
+            maxComposerHeight: maxComposerHeight
+        )
+    }
+
+    private static func morphEditorHeight(
+        for title: String,
+        panelWidth: CGFloat,
+        maxComposerHeight: CGFloat? = nil
+    ) -> CGFloat {
+        morphTextAreaHeight(
+            for: title,
+            panelWidth: panelWidth,
+            maxComposerHeight: maxComposerHeight
+        ) + morphAccessoryRowHeight
+    }
+
+    private static func morphTextAreaMaxHeight(maxComposerHeight: CGFloat?) -> CGFloat {
+        let screenCap = min(
+            UIScreen.main.bounds.height * morphTextAreaMaxScreenFraction,
+            morphTextAreaAbsoluteMaxHeight
+        )
+        var maxHeight = max(morphTextAreaMinHeight, screenCap)
+
+        if let maxComposerHeight {
+            let maxEditorHeight = maxComposerHeight - morphComposerChromeHeightEstimate
+            let maxTextFromComposer = maxEditorHeight - morphAccessoryRowHeight
+            maxHeight = min(maxHeight, max(maxTextFromComposer, morphTextAreaMinHeight))
+        }
+
+        return maxHeight
+    }
+
+    private static func morphTextAreaHeight(
+        for title: String,
+        panelWidth: CGFloat,
+        maxComposerHeight: CGFloat? = nil
+    ) -> CGFloat {
+        let measuredHeight = measuredMorphTextHeight(for: title, panelWidth: panelWidth)
+        let maxHeight = morphTextAreaMaxHeight(maxComposerHeight: maxComposerHeight)
+        return min(max(measuredHeight, morphTextAreaMinHeight), maxHeight)
+    }
+
+    private static func morphTextExceedsVisibleHeight(
+        for title: String,
+        panelWidth: CGFloat,
+        maxComposerHeight: CGFloat? = nil
+    ) -> Bool {
+        measuredMorphTextHeight(for: title, panelWidth: panelWidth)
+            > morphTextAreaHeight(for: title, panelWidth: panelWidth, maxComposerHeight: maxComposerHeight) + 1
+    }
+
+    private static func measuredMorphTextHeight(for title: String, panelWidth: CGFloat) -> CGFloat {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            return morphTextAreaMinHeight
+        }
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 4
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: morphTextMeasurementFont,
+            .paragraphStyle: paragraphStyle
+        ]
+        let textWidth = max(
+            120,
+            panelWidth - (morphTextAreaHorizontalPadding * 2) - morphTextAreaMeasurementInset
+        )
+        let boundingRect = (trimmedTitle as NSString).boundingRect(
+            with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes,
+            context: nil
+        )
+        return ceil(boundingRect.height) + morphTextAreaVerticalMeasurementPadding + morphTextAreaTopInset
     }
 
     private var horizontalPadding: CGFloat {
@@ -178,7 +313,7 @@ struct AddTodoView: View {
                     if isEmbeddedComposer {
                         inlineEditorField
                             .padding(.horizontal, horizontalPadding)
-                            .padding(.top, isMorphShell ? 14 : (pendingImages.isEmpty ? 4 : 8))
+                            .padding(.top, isMorphShell ? 0 : (pendingImages.isEmpty ? 4 : 8))
                     } else {
                         sheetEditorField
                     }
@@ -220,6 +355,7 @@ struct AddTodoView: View {
             .font(.system(size: 22, weight: .regular, design: .rounded))
             .lineSpacing(4)
             .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.never)
             .background(AppSemanticColors.surface)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, horizontalPadding)
@@ -260,15 +396,20 @@ struct AddTodoView: View {
 
     private var inlineEditorField: some View {
         let fieldHorizontalPadding: CGFloat = isMorphShell ? 0 : 14
-        let fieldTopPadding: CGFloat = isMorphShell ? 0 : 12
+        let fieldTopPadding: CGFloat = isMorphShell ? Self.morphTextAreaTopInset : 12
         let fieldBottomPadding: CGFloat = isMorphShell ? 0 : 12
-        let morphTextHeight = Self.morphTextAreaHeight
+        let morphPanelWidth = Self.defaultMorphPanelWidth
+        let morphTextHeight = morphTextAreaHeight(for: title, panelWidth: morphPanelWidth)
+        let morphEditorHeight = morphEditorHeight(for: title, panelWidth: morphPanelWidth)
+        let showsMorphOverflowFade =
+            isMorphShell && morphTextExceedsVisibleHeight(for: title, panelWidth: morphPanelWidth)
 
         let textStack = ZStack(alignment: .topLeading) {
             TextEditor(text: $title)
                 .font(.system(size: 20, weight: .regular, design: .rounded))
                 .lineSpacing(4)
                 .scrollContentBackground(.hidden)
+                .scrollDismissesKeyboard(.never)
                 .frame(
                     minHeight: isMorphShell ? morphTextHeight : Self.inlineEditorMinHeight,
                     maxHeight: isMorphShell ? morphTextHeight : editorMaxHeight,
@@ -279,8 +420,8 @@ struct AddTodoView: View {
                 .padding(.bottom, fieldBottomPadding)
                 .focused($isEditorFocused)
                 .opacity(isEditorFocused || !isTitleEmpty ? 1 : 0.02)
-                .allowsHitTesting(isEditorFocused)
-                .scrollDisabled(isMorphShell && !isEditorFocused)
+                .allowsHitTesting(isEditorFocused || showsMorphOverflowFade)
+                .scrollDisabled(isMorphShell && !isEditorFocused && !showsMorphOverflowFade)
 
             if !isEditorFocused && isTitleEmpty {
                 if isMorphShell {
@@ -311,13 +452,28 @@ struct AddTodoView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if showsMorphOverflowFade {
+                LinearGradient(
+                    colors: [
+                        AppSemanticColors.morphComposerBackground.opacity(0),
+                        AppSemanticColors.morphComposerBackground.opacity(0.94)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: Self.morphOverflowFadeHeight)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
         .frame(
             maxWidth: .infinity,
             maxHeight: isMorphShell ? .infinity : nil,
             alignment: .topLeading
         )
         .overlay {
-            if !isEditorFocused && (isMorphShell || !isTitleEmpty) {
+            if !isEditorFocused && (isMorphShell || !isTitleEmpty) && !showsMorphOverflowFade {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -337,7 +493,7 @@ struct AddTodoView: View {
                     morphEditorAccessory
                         .frame(height: Self.morphAccessoryRowHeight, alignment: .bottom)
                 }
-                .frame(height: Self.morphEditorHeight)
+                .frame(height: morphEditorHeight)
             } else {
                 textStack
                     .background(
@@ -498,13 +654,28 @@ struct AddTodoView: View {
         Group {
             if isMorphShell {
                 VStack(spacing: 0) {
-                    HStack {
+                    ZStack {
                         Text("New Task")
                             .font(.system(size: 20, weight: .semibold, design: .rounded))
 
-                        Spacer()
+                        HStack {
+                            Button {
+                                playLightHaptic()
+                                onCancel()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 34, height: 34)
+                                    .background(AppSemanticColors.neutralFill, in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Close")
 
-                        createButton
+                            Spacer()
+
+                            createButton
+                        }
                     }
                     .padding(.horizontal, horizontalPadding)
                     .padding(.top, horizontalPadding)
@@ -513,6 +684,7 @@ struct AddTodoView: View {
                     Rectangle()
                         .fill(AppSemanticColors.separator.opacity(0.4))
                         .frame(height: 1.5)
+                        .padding(.horizontal, horizontalPadding)
                 }
             } else if isEmbeddedComposer {
                 HStack {

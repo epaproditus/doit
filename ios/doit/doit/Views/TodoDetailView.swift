@@ -136,6 +136,7 @@ struct TodoDetailView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .interactivePopGestureEnabled()
         .task(id: todoID) {
             detentBeforeFocus = nil
             // Realtime for the task row, interactions, and artifacts flows
