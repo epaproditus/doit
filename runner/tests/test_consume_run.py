@@ -22,8 +22,11 @@ class _FakeRunnerDB:
         self.activity: list[dict[str, Any]] = []
         self.interactions: list[dict[str, Any]] = []
         self.superseded: list[str] = []
+        self.marked_interactions: list[dict[str, str]] = []
+        self.consumed_messages: list[list[str]] = []
         self.token_increments: list[int] = []
         self.artifacts: list[dict[str, Any]] = []
+        self.responded_interaction: dict[str, Any] | None = None
 
     def insert_step(self, *, todo_id, user_id, kind, text=None, url=None, tool_name=None):
         self.steps.append({"kind": kind, "text": text, "tool_name": tool_name})
@@ -37,8 +40,20 @@ class _FakeRunnerDB:
     def supersede_open_interactions(self, todo_id):
         self.superseded.append(todo_id)
 
+    def mark_interaction(self, interaction_id, *, status):
+        self.marked_interactions.append({"id": interaction_id, "status": status})
+
     def insert_interaction(self, **kwargs):
         self.interactions.append(kwargs)
+
+    def get_latest_responded_interaction(self, todo_id):
+        return self.responded_interaction
+
+    def get_unconsumed_user_messages(self, todo_id):
+        return []
+
+    def mark_user_messages_consumed(self, ids):
+        self.consumed_messages.append(list(ids))
 
     def increment_todo_tokens(self, todo_id, total):
         self.token_increments.append(total)
@@ -60,13 +75,39 @@ class _FakeRunnerDB:
     def list_apns_tokens(self, user_id):
         return []
 
+    def delete_apns_token(self, token):
+        return None
+
+    def list_live_activity_tokens(self, todo_id):
+        return []
+
+    def delete_live_activity_token(self, token):
+        return None
+
 
 class _FakePusher:
+    def __init__(self) -> None:
+        self.alerts: list[Any] = []
+        self.activity_syncs: list[str] = []
+        self.live_activity_events: list[dict[str, Any]] = []
+
     async def send(self, tokens, payload):
-        return None
+        self.alerts.append(payload)
+        return []
 
     async def send_activity_sync(self, tokens, *, todo_id):
-        return None
+        self.activity_syncs.append(todo_id)
+        return []
+
+    async def send_live_activity(self, tokens, *, event, content_state, dismissal_date=None):
+        self.live_activity_events.append(
+            {
+                "event": event,
+                "content_state": content_state,
+                "dismissal_date": dismissal_date,
+            }
+        )
+        return []
 
 
 class _FakeHermes:
@@ -141,6 +182,7 @@ async def _run(
     *,
     hermes: _FakeHermes | None = None,
     todo: dict | None = None,
+    pusher: _FakePusher | None = None,
     outbound_send_approved: bool = False,
 ) -> str:
     from runner.runner import _consume_run
@@ -148,7 +190,7 @@ async def _run(
     return await _consume_run(
         _CFG,  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
-        _FakePusher(),  # type: ignore[arg-type]
+        pusher or _FakePusher(),  # type: ignore[arg-type]
         hermes or _FakeHermes(events),  # type: ignore[arg-type]
         todo or _TODO,
         "run-1",
@@ -184,6 +226,7 @@ class SilentDoneFixTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_final_reply_still_completes(self) -> None:
         db = _FakeRunnerDB()
+        pusher = _FakePusher()
         terminal = await _run(
             [
                 _tool_started(),
@@ -191,6 +234,7 @@ class SilentDoneFixTests(unittest.IsolatedAsyncioTestCase):
                 _final_response("All done — sent the email."),
             ],
             db,
+            pusher=pusher,
         )
 
         self.assertEqual(terminal, "done")
@@ -200,6 +244,12 @@ class SilentDoneFixTests(unittest.IsolatedAsyncioTestCase):
         final_steps = [s for s in db.steps if s["kind"] == "final"]
         self.assertEqual(len(final_steps), 1)
         self.assertIn("sent the email", final_steps[0]["text"])
+        self.assertIn("todo-1", pusher.activity_syncs)
+        self.assertEqual(pusher.live_activity_events[-1]["event"], "end")
+        self.assertEqual(
+            pusher.live_activity_events[-1]["content_state"]["state"],
+            "completed",
+        )
 
     async def test_late_tool_events_after_done_do_not_reopen_activity(self) -> None:
         db = _FakeRunnerDB()
@@ -355,6 +405,25 @@ class OutboundSendGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(terminal, "done")
         self.assertEqual(db.interactions, [])
+
+    async def test_cancel_helper_writes_terminal_activity(self) -> None:
+        from runner.runner import _write_cancelled_activity
+
+        db = _FakeRunnerDB()
+        pusher = _FakePusher()
+
+        await _write_cancelled_activity(
+            pusher,  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            user_id="user-1",
+            todo_id="todo-1",
+            hermes_run_id="run-1",
+        )
+
+        self.assertEqual(db.activity[-1]["phase"], "cancelled")
+        self.assertEqual(db.activity[-1]["state"], "failed")
+        self.assertEqual(pusher.live_activity_events[-1]["event"], "end")
+        self.assertIn("todo-1", pusher.activity_syncs)
 
     async def test_send_after_tool_result_still_blocks_done(self) -> None:
         # If tool_started was missed, tool_result must still prevent done.

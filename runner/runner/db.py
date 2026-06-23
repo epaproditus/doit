@@ -554,14 +554,56 @@ class DB:
             log.error("sign_attachment_url(%s) failed: %s", storage_path, e)
             return None
 
-    def list_apns_tokens(self, user_id: str) -> list[str]:
+    def list_apns_tokens(self, user_id: str) -> list[dict[str, str]]:
         resp = (
             self._client.table("devices")
-            .select("apns_token")
+            .select("apns_token, apns_environment")
             .eq("user_id", user_id)
             .execute()
         )
-        return [r["apns_token"] for r in (resp.data or [])]
+        return [
+            {
+                "token": r["apns_token"],
+                "environment": r.get("apns_environment") or "production",
+            }
+            for r in (resp.data or [])
+            if r.get("apns_token")
+        ]
+
+    def delete_apns_token(self, token: str) -> None:
+        try:
+            self._client.table("devices").delete().eq("apns_token", token).execute()
+        except Exception as e:
+            log.error("delete_apns_token(%s) failed: %s", token[:8], e)
+
+    def list_live_activity_tokens(self, todo_id: str) -> list[dict[str, str]]:
+        try:
+            resp = (
+                self._client.table("todo_live_activity_tokens")
+                .select("push_token, apns_environment")
+                .eq("todo_id", todo_id)
+                .is_("ended_at", "null")
+                .execute()
+            )
+        except Exception as e:
+            log.error("list_live_activity_tokens(%s) failed: %s", todo_id, e)
+            return []
+        return [
+            {
+                "token": r["push_token"],
+                "environment": r.get("apns_environment") or "production",
+            }
+            for r in (resp.data or [])
+            if r.get("push_token")
+        ]
+
+    def delete_live_activity_token(self, token: str) -> None:
+        try:
+            self._client.table("todo_live_activity_tokens").update(
+                {"ended_at": datetime.now(UTC).isoformat()}
+            ).eq("push_token", token).execute()
+        except Exception as e:
+            log.error("delete_live_activity_token(%s) failed: %s", token[:8], e)
 
     def list_memories(self, user_id: str, limit: int = 20) -> list[dict]:
         """Legacy helper kept for the fallback prompt path.

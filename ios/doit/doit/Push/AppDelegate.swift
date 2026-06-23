@@ -6,6 +6,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// Set from `doitApp` before launch finishes.
     weak var pushManager: PushManager?
     weak var todoStore: TodoStore?
+    private let refreshKinds: Set<String> = [
+        "activity_sync",
+        "done",
+        "failed",
+        "needs_input",
+        "oauth_needed",
+        "tasks_spawned",
+    ]
 
     func application(
         _ application: UIApplication,
@@ -47,6 +55,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
         if let s = userInfo["todo_id"] as? String, let id = UUID(uuidString: s) {
             Task { @MainActor in
+                await self.todoStore?.refreshTodoSurface(id: id)
                 TodoRemoteUpdate.post(todoID: id)
             }
         }
@@ -58,7 +67,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        guard let kind = userInfo["kind"] as? String, kind == "activity_sync" else {
+        guard let kind = userInfo["kind"] as? String, refreshKinds.contains(kind) else {
             completionHandler(.noData)
             return
         }
@@ -71,8 +80,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             return
         }
         Task { @MainActor in
-            print("[push] activity_sync background refresh todo=\(todoID)")
-            await store.refreshAgentActivity(for: todoID)
+            print("[push] \(kind) background refresh todo=\(todoID)")
+            if kind == "activity_sync" {
+                await store.refreshAgentActivity(for: todoID)
+            } else {
+                await store.refreshTodoSurface(id: todoID)
+                TodoRemoteUpdate.post(todoID: todoID)
+            }
             completionHandler(.newData)
         }
     }

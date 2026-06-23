@@ -448,7 +448,11 @@ private struct IntentCard: View {
         .offset(y: isBehind ? 10 : 0)
         .opacity(isBehind ? 0.72 : 1)
         .zIndex(isBehind ? 0 : 1)
-        .transition(.asymmetric(insertion: .offset(y: 120), removal: .opacity))
+        .transition(
+            isBehind
+                ? .opacity
+                : .asymmetric(insertion: .offset(y: 120), removal: .opacity)
+        )
     }
 }
 

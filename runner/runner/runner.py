@@ -430,7 +430,14 @@ async def run_one_todo(
             )
             if pending_ids:
                 db.mark_user_messages_consumed(pending_ids)
-            return
+            await _write_cancelled_activity(
+                pusher,
+                db,
+                user_id=user_id,
+                todo_id=todo_id,
+                hermes_run_id=None,
+            )
+            return "cancelled"
 
     log.info("processing todo %s user=%s title=%r", todo_id, user_id, title)
     _write_activity(
@@ -753,15 +760,11 @@ async def run_one_todo(
                 kind="error",
                 text="Cancelled by user.",
             )
-            _write_activity(
+            await _write_cancelled_activity(
+                pusher,
                 db,
-                todo_id=todo_id,
                 user_id=user_id,
-                snapshot=AgentActivityService().mark_terminal(
-                    state="failed",
-                    phase="cancelled",
-                    title="Cancelled",
-                ),
+                todo_id=todo_id,
                 hermes_run_id=run_id,
             )
         elif consume_task in done:
@@ -885,7 +888,7 @@ async def run_one_todo(
 
     # Terminal push.
     if terminal_status == "done":
-        await pusher.send(
+        invalid = await pusher.send(
             db.list_apns_tokens(user_id),
             PushPayload(
                 title="Done",
@@ -894,8 +897,10 @@ async def run_one_todo(
                 kind="done",
             ),
         )
+        for token in invalid:
+            db.delete_apns_token(token)
     elif terminal_status == "failed":
-        await pusher.send(
+        invalid = await pusher.send(
             db.list_apns_tokens(user_id),
             PushPayload(
                 title="Task failed",
@@ -904,6 +909,8 @@ async def run_one_todo(
                 kind="failed",
             ),
         )
+        for token in invalid:
+            db.delete_apns_token(token)
     # needs_auth pushes are sent inline by _consume_run when the URL appears.
     # cancelled produces no push (the user did it themselves).
 
@@ -1055,6 +1062,13 @@ async def prepare_one_todo(
                     user_id=user_id,
                     kind="error",
                     text="Cancelled by user.",
+                )
+                await _write_cancelled_activity(
+                    pusher,
+                    db,
+                    user_id=user_id,
+                    todo_id=todo_id,
+                    hermes_run_id=None,
                 )
                 return
 
@@ -1420,14 +1434,170 @@ async def _notify_live_activity_sync(
     snapshot: ActivitySnapshot,
 ) -> None:
     """Wake the iOS app briefly so it can refresh Live Activities while backgrounded."""
-    if snapshot.state not in ("running", "paused"):
-        return
+    is_terminal = snapshot.state not in ("running", "paused")
     now = time.time()
     last = _ACTIVITY_SYNC_LAST_PUSH.get(todo_id, 0.0)
-    if now - last < _ACTIVITY_SYNC_PUSH_INTERVAL:
+    if not is_terminal and now - last < _ACTIVITY_SYNC_PUSH_INTERVAL:
         return
     _ACTIVITY_SYNC_LAST_PUSH[todo_id] = now
-    await pusher.send_activity_sync(db.list_apns_tokens(user_id), todo_id=todo_id)
+    invalid = await pusher.send_activity_sync(db.list_apns_tokens(user_id), todo_id=todo_id)
+    for token in invalid:
+        db.delete_apns_token(token)
+
+
+async def _notify_live_activity_push(
+    pusher: Pusher,
+    db: DB,
+    *,
+    todo_id: str,
+    snapshot: ActivitySnapshot,
+) -> None:
+    """Update the system Live Activity directly via ActivityKit APNs."""
+    event = "end" if snapshot.state in {"completed", "failed"} else "update"
+    dismissal_date = None
+    if event == "end":
+        dismissal_date = datetime.now(timezone.utc).timestamp() + 12
+        dismissal_dt = datetime.fromtimestamp(dismissal_date, tz=timezone.utc)
+    else:
+        dismissal_dt = None
+    invalid = await pusher.send_live_activity(
+        db.list_live_activity_tokens(todo_id),
+        event=event,
+        content_state=_activitykit_content_state(snapshot),
+        dismissal_date=dismissal_dt,
+    )
+    for token in invalid:
+        db.delete_live_activity_token(token)
+
+
+async def _write_cancelled_activity(
+    pusher: Pusher,
+    db: DB,
+    *,
+    user_id: str,
+    todo_id: str,
+    hermes_run_id: str | None,
+) -> None:
+    snapshot = AgentActivityService().mark_terminal(
+        state="failed",
+        phase="cancelled",
+        title="Cancelled",
+    )
+    _write_activity(
+        db,
+        todo_id=todo_id,
+        user_id=user_id,
+        snapshot=snapshot,
+        hermes_run_id=hermes_run_id,
+    )
+    await _notify_live_activity_push(
+        pusher,
+        db,
+        todo_id=todo_id,
+        snapshot=snapshot,
+    )
+    await _notify_live_activity_sync(
+        pusher,
+        db,
+        user_id=user_id,
+        todo_id=todo_id,
+        snapshot=snapshot,
+    )
+
+
+def _activitykit_content_state(snapshot: ActivitySnapshot) -> dict[str, Any]:
+    steps = snapshot.recent
+    previous = _activitykit_intent(steps[-2]) if len(steps) >= 2 else None
+    second_previous = _activitykit_intent(steps[-3]) if len(steps) >= 3 else None
+    end_date = snapshot.completed_at if snapshot.state in {"completed", "failed"} else None
+    state = snapshot.state if snapshot.state in {"running", "paused", "completed", "failed"} else "running"
+    primary = _activity_display_text(snapshot.title, snapshot.detail, snapshot.tool_category)
+
+    return {
+        "currentIntent": primary,
+        "subject": primary,
+        "toolCallTitle": snapshot.title,
+        "currentSymbolName": _symbol_name(snapshot.tool_category),
+        "previousIntent": previous,
+        "secondPreviousIntent": second_previous,
+        "stepNumber": len(steps),
+        "state": state,
+        "intentStartDate": snapshot.started_at or datetime.now(timezone.utc).isoformat(),
+        "intentEndDate": end_date,
+        "costTotal": None,
+    }
+
+
+def _activitykit_intent(step: Any) -> dict[str, Any]:
+    return {
+        "id": f"{step.started_at}-{step.title}",
+        "title": _activity_display_text(step.title, step.detail, step.tool_category),
+        "symbolName": _symbol_name(step.tool_category),
+        "isCompleted": bool(step.completed_at),
+    }
+
+
+def _activity_display_text(title: str, detail: str | None, category: str | None) -> str:
+    if detail and not _looks_like_tool_noise(detail):
+        return detail
+    return title.strip() or _fallback_activity_text(category)
+
+
+def _looks_like_tool_noise(text: str) -> bool:
+    stripped = text.strip()
+    lower = stripped.lower()
+    if len(stripped) < 4:
+        return True
+    if stripped.startswith(("{", "[")) or lower.startswith(("http://", "https://")):
+        return True
+    if any(marker in lower for marker in ("```", "&&", " --", "#!/", "path=")):
+        return True
+    command_prefixes = (
+        "set -", "rm ", "git ", "cd ", "mkdir ", "cp ", "mv ", "curl ",
+        "python ", "python3 ", "npm ", "pnpm ", "yarn ", "swift ",
+        "xcodebuild ", "sed ", "awk ", "grep ", "rg ", "cat ", "ls ",
+    )
+    return lower.startswith(command_prefixes)
+
+
+def _fallback_activity_text(category: str | None) -> str:
+    return {
+        "gmail": "Working with Gmail",
+        "calendar": "Working with the calendar",
+        "sheets": "Working on a spreadsheet",
+        "docs": "Working on a document",
+        "drive": "Working with Drive",
+        "search": "Searching for information",
+        "browser": "Reading from the web",
+        "thinking": "Thinking through the next step",
+        "question": "Waiting for your reply",
+        "final": "Wrapping up",
+        "error": "Checking what went wrong",
+    }.get(category or "", "Working…")
+
+
+def _symbol_name(category: str | None) -> str:
+    return {
+        "gmail": "envelope.fill",
+        "calendar": "calendar",
+        "sheets": "tablecells",
+        "docs": "doc.text.fill",
+        "drive": "externaldrive.fill",
+        "notion": "book.closed.fill",
+        "slack": "number",
+        "audio": "waveform",
+        "oauth": "key.fill",
+        "search": "magnifyingglass",
+        "browser": "safari",
+        "thinking": "sparkles",
+        "question": "questionmark.bubble.fill",
+        "final": "checkmark.seal.fill",
+        "error": "exclamationmark.triangle.fill",
+        "instacart": "cart.fill",
+        "twitter": "bird.fill",
+        "reddit": "newspaper.fill",
+        "figma": "paintpalette.fill",
+    }.get(category or "", "wrench.and.screwdriver.fill")
 
 
 def _placeholder_gate_enforced() -> bool:
@@ -1908,6 +2078,12 @@ async def _consume_run(
             else:
                 snapshot = activity.heartbeat(latest_activity)
             if write_run_activity(snapshot):
+                await _notify_live_activity_push(
+                    pusher,
+                    db,
+                    todo_id=todo_id,
+                    snapshot=snapshot,
+                )
                 await _notify_live_activity_sync(
                     pusher,
                     db,
@@ -1922,6 +2098,12 @@ async def _consume_run(
         detail=None,
     )
     if write_run_activity(start_snapshot):
+        await _notify_live_activity_push(
+            pusher,
+            db,
+            todo_id=todo_id,
+            snapshot=start_snapshot,
+        )
         await _notify_live_activity_sync(
             pusher,
             db,
@@ -1981,6 +2163,12 @@ async def _consume_run(
             if snap is not None and effect.new_status is None:
                 latest_activity = snap
                 if write_run_activity(snap):
+                    await _notify_live_activity_push(
+                        pusher,
+                        db,
+                        todo_id=todo_id,
+                        snapshot=snap,
+                    )
                     await _notify_live_activity_sync(
                         pusher,
                         db,
@@ -2177,14 +2365,26 @@ async def _consume_run(
                             kind="needs_input",
                         ),
                     )
-                    write_terminal_activity(
-                        activity.mark_terminal(
+                    terminal_snapshot = activity.mark_terminal(
                             state="paused",
                             phase="needs_input",
                             title="Needs your input",
                             detail=_PLACEHOLDER_NEEDS_INPUT_PROMPT,
                         )
-                    )
+                    if write_terminal_activity(terminal_snapshot):
+                        await _notify_live_activity_push(
+                            pusher,
+                            db,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
+                        await _notify_live_activity_sync(
+                            pusher,
+                            db,
+                            user_id=user_id,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
                     await _reconcile_run_tokens(
                         db, hermes, todo_id, run_id, live_total
                     )
@@ -2220,14 +2420,26 @@ async def _consume_run(
                             kind="oauth_needed",
                         ),
                     )
-                    write_terminal_activity(
-                        activity.mark_terminal(
+                    terminal_snapshot = activity.mark_terminal(
                             state="paused",
                             phase="needs_auth",
                             title="Connect an account to continue",
                             detail=effect.text,
                         )
-                    )
+                    if write_terminal_activity(terminal_snapshot):
+                        await _notify_live_activity_push(
+                            pusher,
+                            db,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
+                        await _notify_live_activity_sync(
+                            pusher,
+                            db,
+                            user_id=user_id,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
                     # The run usually pauses here in practice; we stop consuming
                     # so the next "Do it" can resume cleanly with fresh creds.
                     await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
@@ -2267,14 +2479,26 @@ async def _consume_run(
                             kind="needs_input",
                         ),
                     )
-                    write_terminal_activity(
-                        activity.mark_terminal(
+                    terminal_snapshot = activity.mark_terminal(
                             state="paused",
                             phase="needs_input",
                             title="Needs your input",
                             detail=effect.interaction.prompt,
                         )
-                    )
+                    if write_terminal_activity(terminal_snapshot):
+                        await _notify_live_activity_push(
+                            pusher,
+                            db,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
+                        await _notify_live_activity_sync(
+                            pusher,
+                            db,
+                            user_id=user_id,
+                            todo_id=todo_id,
+                            snapshot=terminal_snapshot,
+                        )
                     await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
                     return "needs_input"
 
@@ -2442,6 +2666,20 @@ async def _consume_run(
     if terminal in ("done", "failed"):
         db.supersede_open_interactions(todo_id)
         await _reconcile_run_tokens(db, hermes, todo_id, run_id, live_total)
+    if latest_activity is not None and latest_activity.state != "running":
+        await _notify_live_activity_push(
+            pusher,
+            db,
+            todo_id=todo_id,
+            snapshot=latest_activity,
+        )
+        await _notify_live_activity_sync(
+            pusher,
+            db,
+            user_id=user_id,
+            todo_id=todo_id,
+            snapshot=latest_activity,
+        )
     return terminal
 
 _AUDIO_MIME_BY_EXT: dict[str, str] = {

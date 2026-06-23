@@ -266,6 +266,50 @@ enum TodosAPI {
         return byTodo
     }
 
+    // MARK: - ActivityKit push tokens
+
+    static func upsertLiveActivityToken(
+        todoID: UUID,
+        userID: UUID,
+        activityID: String,
+        pushToken: String,
+        environment: APNSEnvironment
+    ) async throws {
+        struct Row: Encodable {
+            let todo_id: UUID
+            let user_id: UUID
+            let activity_id: String
+            let push_token: String
+            let apns_environment: String
+            let ended_at: Date?
+        }
+
+        _ = try await Supa.client
+            .from("todo_live_activity_tokens")
+            .upsert(
+                Row(
+                    todo_id: todoID,
+                    user_id: userID,
+                    activity_id: activityID,
+                    push_token: pushToken,
+                    apns_environment: environment.rawValue,
+                    ended_at: nil
+                ),
+                onConflict: "todo_id,activity_id"
+            )
+            .execute()
+    }
+
+    static func endLiveActivityToken(activityID: String) async throws {
+        struct Patch: Encodable { let ended_at: Date }
+
+        _ = try await Supa.client
+            .from("todo_live_activity_tokens")
+            .update(Patch(ended_at: Date()))
+            .eq("activity_id", value: activityID)
+            .execute()
+    }
+
     /// Submit a user response and re-queue the todo so the runner can resume.
     /// We update the interaction first; the runner reads the response off the
     /// row when it next claims the todo.

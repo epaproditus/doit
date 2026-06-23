@@ -351,13 +351,18 @@ struct TodoListView: View {
                                 todoCard(for: todo)
                             }
 
-                            TaskSectionHeader(title: "Suggested", verticalPadding: 0)
-                                .padding(.top, 6)
+                            VStack(spacing: 10) {
+                                TaskSectionHeader(
+                                    title: "Suggested Topics",
+                                    titleSuffix: "Coming soon",
+                                    verticalPadding: 0
+                                )
 
-                            SuggestedCategoryStrip(
-                                categories: SuggestedCategoryCatalog.taskCategories
-                            )
-                            .padding(.bottom, 2)
+                                SuggestedCategoryStrip(
+                                    categories: SuggestedCategoryCatalog.taskCategories
+                                )
+                            }
+                            .padding(.top, 6)
 
                             if shouldShowConnectionsPromo {
                                 ExploreConnectionsPromoCard(
@@ -1748,6 +1753,7 @@ private extension ScheduledPromptCategory {
 
 private struct TaskSectionHeader: View {
     let title: String
+    var titleSuffix: String? = nil
     var trailingIconName: String? = nil
     var trailingLabel: String? = nil
     var trailingAction: (() -> Void)? = nil
@@ -1769,6 +1775,12 @@ private struct TaskSectionHeader: View {
             Text(title)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.primary.opacity(0.78))
+
+            if let titleSuffix {
+                Text(titleSuffix)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
 
             Spacer(minLength: 0)
 
@@ -4032,14 +4044,14 @@ private struct TodoStateLabel: View {
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 12, height: 12)
+                .frame(width: 10, height: 10)
                 .foregroundStyle(TodoCardStyle.headerChrome)
         case .cancelled:
             Image("Canceled_Icon")
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 20, height: 20)
+                .frame(width: 12, height: 12)
                 .foregroundStyle(TodoCardStyle.headerChrome)
         case .preparing, .requested, .running:
             ProgressView()

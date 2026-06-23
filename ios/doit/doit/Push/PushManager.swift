@@ -34,15 +34,26 @@ final class PushManager {
             print("[push] skipping device upsert; no signed-in user id")
             return
         }
-        struct Row: Encodable { let user_id: UUID; let apns_token: String }
+        struct Row: Encodable {
+            let user_id: UUID
+            let apns_token: String
+            let apns_environment: String
+        }
         do {
             // Upsert keyed on (user_id, apns_token) — duplicate inserts are
             // a no-op thanks to the composite PK.
             _ = try await Supa.client
                 .from("devices")
-                .upsert(Row(user_id: userID, apns_token: token), onConflict: "user_id,apns_token")
+                .upsert(
+                    Row(
+                        user_id: userID,
+                        apns_token: token,
+                        apns_environment: APNSEnvironment.current.rawValue
+                    ),
+                    onConflict: "user_id,apns_token"
+                )
                 .execute()
-            print("[push] device token upsert succeeded")
+            print("[push] device token upsert succeeded environment=\(APNSEnvironment.current.rawValue)")
         } catch {
             print("[push] device upsert failed: \(error)")
         }

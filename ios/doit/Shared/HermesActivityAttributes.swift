@@ -109,6 +109,70 @@ public struct HermesActivityAttributes: ActivityAttributes {
 
         public var isRunning: Bool { state == "running" }
         public var isTerminal: Bool { state == "completed" || state == "failed" }
+
+        enum CodingKeys: String, CodingKey {
+            case currentIntent
+            case subject
+            case toolCallTitle
+            case currentSymbolName
+            case previousIntent
+            case secondPreviousIntent
+            case stepNumber
+            case state
+            case intentStartDate
+            case intentEndDate
+            case costTotal
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.currentIntent = try container.decode(String.self, forKey: .currentIntent)
+            self.subject = try container.decodeIfPresent(String.self, forKey: .subject)
+            self.toolCallTitle = try container.decodeIfPresent(String.self, forKey: .toolCallTitle)
+            self.currentSymbolName = try container.decode(String.self, forKey: .currentSymbolName)
+            self.previousIntent = try container.decodeIfPresent(WidgetIntent.self, forKey: .previousIntent)
+            self.secondPreviousIntent = try container.decodeIfPresent(WidgetIntent.self, forKey: .secondPreviousIntent)
+            self.stepNumber = try container.decodeIfPresent(Int.self, forKey: .stepNumber) ?? 0
+            self.state = try container.decodeIfPresent(String.self, forKey: .state) ?? "running"
+            self.intentStartDate = try Self.decodeDate(container, forKey: .intentStartDate) ?? .now
+            self.intentEndDate = try Self.decodeDate(container, forKey: .intentEndDate)
+            self.costTotal = try container.decodeIfPresent(String.self, forKey: .costTotal)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(currentIntent, forKey: .currentIntent)
+            try container.encodeIfPresent(subject, forKey: .subject)
+            try container.encodeIfPresent(toolCallTitle, forKey: .toolCallTitle)
+            try container.encode(currentSymbolName, forKey: .currentSymbolName)
+            try container.encodeIfPresent(previousIntent, forKey: .previousIntent)
+            try container.encodeIfPresent(secondPreviousIntent, forKey: .secondPreviousIntent)
+            try container.encode(stepNumber, forKey: .stepNumber)
+            try container.encode(state, forKey: .state)
+            try container.encode(Self.encodeDate(intentStartDate), forKey: .intentStartDate)
+            try container.encodeIfPresent(intentEndDate.map(Self.encodeDate), forKey: .intentEndDate)
+            try container.encodeIfPresent(costTotal, forKey: .costTotal)
+        }
+
+        private static func encodeDate(_ date: Date) -> String {
+            ISO8601DateFormatter().string(from: date)
+        }
+
+        private static func decodeDate(
+            _ container: KeyedDecodingContainer<CodingKeys>,
+            forKey key: CodingKeys
+        ) throws -> Date? {
+            if let text = try container.decodeIfPresent(String.self, forKey: key) {
+                let fractional = ISO8601DateFormatter()
+                fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let date = fractional.date(from: text) { return date }
+                return ISO8601DateFormatter().date(from: text)
+            }
+            if let unixSeconds = try container.decodeIfPresent(Double.self, forKey: key) {
+                return Date(timeIntervalSince1970: unixSeconds)
+            }
+            return nil
+        }
     }
 
     /// Stable id of the todo this activity tracks. We key live activities

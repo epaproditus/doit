@@ -34,6 +34,7 @@ final class AgentLiveActivityManager {
     private var pendingUpdateTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingSnapshots: [UUID: (AgentActivity, String)] = [:]
     private var terminalDismissTasks: [UUID: Task<Void, Never>] = [:]
+    private var tokenUpdateTasks: [UUID: Task<Void, Never>] = [:]
 
     /// How long a completed / failed Live Activity should remain visible
     /// after Hermes returns. Keep this short: the detail view and chat are
@@ -57,7 +58,7 @@ final class AgentLiveActivityManager {
     /// `AgentActivity` rows from `TodoStore`. Caller looks up titles via
     /// the matching `Todo` row so the activity attributes have a clean
     /// display name even if the snapshot title shifts mid-run.
-    func sync(activities: [UUID: AgentActivity], titles: [UUID: String]) {
+    func sync(activities: [UUID: AgentActivity], titles: [UUID: String], userID: UUID?) {
         let canStartOrUpdate = ActivityAuthorizationInfo().areActivitiesEnabled
 
         // Start / update activities for running snapshots. Ending happens
@@ -70,9 +71,10 @@ final class AgentLiveActivityManager {
                 terminalDismissTasks[todoID]?.cancel()
                 terminalDismissTasks.removeValue(forKey: todoID)
                 if let existing = owned[todoID] {
+                    observePushTokenUpdatesIfNeeded(for: existing, userID: userID)
                     enqueueUpdate(existing, snapshot: snapshot, taskTitle: taskTitle)
                 } else {
-                    startActivity(for: todoID, snapshot: snapshot, taskTitle: taskTitle)
+                    startActivity(for: todoID, snapshot: snapshot, taskTitle: taskTitle, userID: userID)
                 }
             } else if snapshot.isTerminal {
                 // Send one final update and end the activity. We keep the
@@ -104,6 +106,9 @@ final class AgentLiveActivityManager {
             pendingSnapshots.removeValue(forKey: todoID)
             terminalDismissTasks[todoID]?.cancel()
             terminalDismissTasks.removeValue(forKey: todoID)
+            tokenUpdateTasks[todoID]?.cancel()
+            tokenUpdateTasks.removeValue(forKey: todoID)
+            Task { await markActivityTokenEnded(activityID: activity.id) }
         }
     }
 
@@ -119,12 +124,16 @@ final class AgentLiveActivityManager {
             pendingSnapshots.removeValue(forKey: todoID)
             terminalDismissTasks[todoID]?.cancel()
             terminalDismissTasks.removeValue(forKey: todoID)
+            tokenUpdateTasks[todoID]?.cancel()
+            tokenUpdateTasks.removeValue(forKey: todoID)
+            Task { await markActivityTokenEnded(activityID: activity.id) }
         }
         lastUpdate.removeAll()
         lastStateSignature.removeAll()
         pendingUpdateTasks.removeAll()
         pendingSnapshots.removeAll()
         terminalDismissTasks.removeAll()
+        tokenUpdateTasks.removeAll()
     }
 
     // MARK: - Internals
@@ -132,7 +141,8 @@ final class AgentLiveActivityManager {
     private func startActivity(
         for todoID: UUID,
         snapshot: AgentActivity,
-        taskTitle: String
+        taskTitle: String,
+        userID: UUID?
     ) {
         let attributes = HermesActivityAttributes(
             todoID: todoID,
@@ -146,7 +156,7 @@ final class AgentLiveActivityManager {
             let activity = try Activity.request(
                 attributes: attributes,
                 content: .init(state: state, staleDate: nil),
-                pushType: nil
+                pushType: .token
             )
             owned[todoID] = activity
             lastUpdate[todoID] = Date()
@@ -155,8 +165,36 @@ final class AgentLiveActivityManager {
             pendingUpdateTasks.removeValue(forKey: todoID)
             terminalDismissTasks[todoID]?.cancel()
             terminalDismissTasks.removeValue(forKey: todoID)
+            observePushTokenUpdatesIfNeeded(for: activity, userID: userID)
         } catch {
             print("[live-activity] start failed todo=\(todoID) error=\(error)")
+        }
+    }
+
+    private func observePushTokenUpdatesIfNeeded(
+        for activity: Activity<HermesActivityAttributes>,
+        userID: UUID?
+    ) {
+        let todoID = activity.attributes.todoID
+        guard tokenUpdateTasks[todoID] == nil else { return }
+        guard let userID else { return }
+
+        tokenUpdateTasks[todoID] = Task { [activity] in
+            for await tokenData in activity.pushTokenUpdates {
+                let token = tokenData.map { String(format: "%02x", $0) }.joined()
+                do {
+                    try await TodosAPI.upsertLiveActivityToken(
+                        todoID: todoID,
+                        userID: userID,
+                        activityID: activity.id,
+                        pushToken: token,
+                        environment: APNSEnvironment.current
+                    )
+                    print("[live-activity] push token upsert todo=\(todoID) environment=\(APNSEnvironment.current.rawValue)")
+                } catch {
+                    print("[live-activity] push token upsert failed todo=\(todoID) error=\(error)")
+                }
+            }
         }
     }
 
@@ -234,13 +272,13 @@ final class AgentLiveActivityManager {
         lastUpdate[todoID] = Date()
         lastStateSignature[todoID] = signature
         print("[live-activity] finish todo=\(todoID) state=\(state.state) intent=\(state.currentIntent)")
-        await activity.update(.init(state: state, staleDate: nil))
-
-        try? await Task.sleep(nanoseconds: UInt64(terminalDismissalDelay * 1_000_000_000))
-        guard !Task.isCancelled else { return }
-        guard owned[todoID]?.id == activity.id else { return }
+        let dismissalDate = Date().addingTimeInterval(terminalDismissalDelay)
+        await activity.end(
+            .init(state: state, staleDate: nil),
+            dismissalPolicy: .after(dismissalDate)
+        )
         print("[live-activity] dismiss todo=\(todoID)")
-        await activity.end(nil, dismissalPolicy: .immediate)
+        await markActivityTokenEnded(activityID: activity.id)
         cleanupActivity(todoID)
     }
 
@@ -315,5 +353,15 @@ final class AgentLiveActivityManager {
         pendingSnapshots.removeValue(forKey: todoID)
         terminalDismissTasks[todoID]?.cancel()
         terminalDismissTasks.removeValue(forKey: todoID)
+        tokenUpdateTasks[todoID]?.cancel()
+        tokenUpdateTasks.removeValue(forKey: todoID)
+    }
+
+    private func markActivityTokenEnded(activityID: String) async {
+        do {
+            try await TodosAPI.endLiveActivityToken(activityID: activityID)
+        } catch {
+            print("[live-activity] token end failed activity=\(activityID) error=\(error)")
+        }
     }
 }

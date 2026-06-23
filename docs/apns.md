@@ -16,13 +16,20 @@ Runner (VM)                    Apple APNs              iOS app
     |                              |     (if app backgrounded / killed)
 ```
 
-Doit uses APNs as a **backup** channel. When the app is open, task and agent
-updates flow through **Supabase Realtime** into `TodoStore` — that is the
+Doit uses APNs as the **background** channel. When the app is open, task and
+agent updates flow through **Supabase Realtime** into `TodoStore` — that is the
 primary in-app path. See [`task-realtime.md`](task-realtime.md) and
 [`README.md`](../README.md).
 
 The runner sends pushes at key moments (run finished, needs OAuth, activity
 sync while backgrounded). Implementation: [`runner/runner/push.py`](../runner/runner/push.py).
+
+There are now two APNs token types:
+
+- **Device tokens** in `devices`, used for visible notifications and silent
+  `activity_sync` app wakeups.
+- **ActivityKit Live Activity tokens** in `todo_live_activity_tokens`, used to
+  update the Lock Screen / Dynamic Island directly while the app is suspended.
 
 ## Sandbox vs production (Apple's two environments)
 
@@ -65,23 +72,18 @@ After changing the flag:
 ssh root@<vm> 'systemctl restart doit-runner'
 ```
 
-### Current limitation: one environment at a time
+### Environment routing
 
-The runner has a **single** boolean. It cannot simultaneously deliver to
-sandbox tokens (Xcode dev) and production tokens (TestFlight) with one config.
+Device rows carry `apns_environment` (`sandbox` or `production`). The runner
+routes each token to the matching Apple host, so Xcode-installed sandbox tokens
+and TestFlight production tokens can coexist in the database.
 
-| VM setting | Xcode dev push | TestFlight push |
-| ---------- | -------------- | --------------- |
-| `APNS_USE_SANDBOX=true` | Works | Does not work |
-| `APNS_USE_SANDBOX=false` | Does not work | Works |
+`APNS_USE_SANDBOX` remains as the fallback environment for legacy rows that do
+not carry `apns_environment`, and for manual credential smoke tests.
 
-**Workaround today:** flip the flag when you switch between "I am testing from
-Xcode" and "I am testing TestFlight." For local dev without push, rely on
-Realtime (most UI updates still work).
-
-**Possible future improvement:** dual-send (try both endpoints per notification)
-or store `apns_environment` per row in `devices` and route each token to the
-correct host. Not implemented yet.
+Wrong-environment tokens still get `BadDeviceToken` from Apple. The runner logs
+the environment and token prefix, then prunes tokens it can safely identify as
+invalid.
 
 ## Apple Developer setup (New Material)
 
@@ -140,7 +142,7 @@ Deploy script [`scripts/deploy-runner.sh`](../scripts/deploy-runner.sh) does
 1. After sign-in, requests notification permission.
 2. Calls `registerForRemoteNotifications()`.
 3. On token from the system, upserts into Supabase `devices` as
-   `(user_id, apns_token)`.
+   `(user_id, apns_token, apns_environment)`.
 
 Schema ([`20240601000001_init.sql`](../supabase/migrations/20240601000001_init.sql)):
 
@@ -148,18 +150,35 @@ Schema ([`20240601000001_init.sql`](../supabase/migrations/20240601000001_init.s
 create table devices (
     user_id    uuid not null references auth.users(id) on delete cascade,
     apns_token text not null,
+    apns_environment text not null default 'production',
     updated_at timestamptz not null default now(),
     primary key (user_id, apns_token)
 );
 ```
 
-A user can have **multiple** tokens (e.g. old sandbox + new production) because
-the primary key is the pair. The runner does not filter by environment today —
-it sends every stored token to the **one** endpoint selected by
-`APNS_USE_SANDBOX`. Wrong-environment tokens get `BadDeviceToken` from Apple
-and are logged as warnings.
+A user can have **multiple** tokens (e.g. one sandbox Xcode install and one
+production TestFlight install). The runner sends each token to the host matching
+its stored environment.
 
 Push does **not** work in the iOS Simulator; use a real device or TestFlight.
+
+## Live Activity pushes
+
+The in-app activity card still updates through Realtime. The Lock Screen /
+Dynamic Island additionally uses ActivityKit push tokens so updates keep
+animating after iOS suspends the app:
+
+1. `AgentLiveActivityManager` starts the activity with `pushType: .token`.
+2. iOS stores the ActivityKit push token in `todo_live_activity_tokens` with
+   `todo_id`, `activity_id`, and `apns_environment`.
+3. The runner converts each `ActivitySnapshot` to
+   `HermesActivityAttributes.ContentState` and sends APNs with:
+   - `apns-push-type: liveactivity`
+   - `apns-topic: com.newmaterial.doit.push-type.liveactivity`
+4. Terminal snapshots send ActivityKit `end` events with a short
+   `dismissal-date`.
+5. Silent `activity_sync` pushes remain as a compatibility fallback so the app
+   refreshes local state when iOS grants background execution time.
 
 ## Operational cheat sheet
 
@@ -222,10 +241,12 @@ PY
 
 | Symptom | Check |
 | ------- | ----- |
-| No push on TestFlight | `APNS_USE_SANDBOX=false`; user opened TestFlight build and allowed notifications; `devices` row exists for that user |
-| No push on Xcode dev | `APNS_USE_SANDBOX=true`; not using TestFlight build on the same test |
+| No push on TestFlight | User opened TestFlight build and allowed notifications; `devices` row exists with `apns_environment = production` |
+| No push on Xcode dev | Real device Xcode build registered a row with `apns_environment = sandbox` |
 | `InvalidProviderToken` in logs | `APNS_TEAM_ID` matches key's team; `.p8` on VM matches `APNS_KEY_ID` |
 | Push sent but app unchanged | App may be foregrounded — Realtime handles in-app; push is for background. Check `todo_id` / `kind` in payload |
+| Live Activity ticks only when app wakes | Check `todo_live_activity_tokens` row exists; runner logs `APNs liveactivity ... succeeded` |
+| `BadDeviceToken` | Token environment mismatched or stale; check logged `env=` and token prefix |
 | Sign-in works but push fails | Separate systems — Sign in with Apple does not depend on APNs key |
 
 Runner logs: `journalctl -u doit-runner -f` on the VM.

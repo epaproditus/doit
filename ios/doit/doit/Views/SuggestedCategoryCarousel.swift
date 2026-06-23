@@ -188,10 +188,13 @@ struct ScheduledPromptCategory: Identifiable, Hashable {
 
 enum SuggestedCategoryCatalog {
     static let taskCategories: [SuggestedCategory] = [
-        SuggestedCategory(id: "courts", title: "Courts", imageName: "Courts"),
-        SuggestedCategory(id: "flights", title: "Flights", imageName: "Flights"),
-        SuggestedCategory(id: "stays", title: "Stays", imageName: "Stays"),
-        SuggestedCategory(id: "trains", title: "Trains", imageName: "Trains"),
+        SuggestedCategory(id: "travel-bookings", title: "Travel & Bookings", imageName: "TravelBookings"),
+        SuggestedCategory(id: "coding-development", title: "Coding & Development", imageName: "CodingDevelopment"),
+        SuggestedCategory(id: "admin", title: "Admin", imageName: "Admin"),
+        SuggestedCategory(id: "research", title: "Research", imageName: "Research"),
+        SuggestedCategory(id: "lead-generation", title: "Lead Generation", imageName: "LeadGeneration"),
+        SuggestedCategory(id: "content-creation", title: "Content Creation", imageName: "ContentCreation"),
+        SuggestedCategory(id: "home-automation", title: "Home Automation", imageName: "HomeAutomation"),
     ]
 
     static let scheduledCategories: [SuggestedCategory] = scheduledPromptCategories.map {
@@ -613,7 +616,7 @@ struct SuggestedCategoryStrip: View {
 private struct SuggestedCategoryTile: View {
     let category: SuggestedCategory
 
-    private let imageSize: CGFloat = 30
+    private let imageSize: CGFloat = 34
 
     var body: some View {
         HStack(spacing: 8) {
@@ -626,13 +629,13 @@ private struct SuggestedCategoryTile: View {
                 }
 
             Text(category.title)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
         }
-        .padding(.leading, 6)
+        .padding(.leading, 7)
         .padding(.trailing, 14)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .background(AppSemanticColors.elevatedSurface, in: Capsule())
         .overlay {
             Capsule()

@@ -207,7 +207,7 @@ contract:
 | ------------------------ | -------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | Todo list card subtitle  | [`TodoListView.swift`](../ios/doit/doit/Views/TodoListView.swift)`/TodoCard.statusText`                          | `store.agentActivityByTodoID[todo.id]` |
 | Detail-header activity card | [`TaskHeaderView.swift`](../ios/doit/doit/Views/TodoChat/TaskHeaderView.swift) + [`AgentActivityCard.swift`](../ios/doit/doit/Views/AgentActivity/AgentActivityCard.swift) | `store.agentActivity(for: todoID)`     |
-| Live Activity widget     | [`AgentLiveActivityManager.swift`](../ios/doit/doit/Stores/AgentLiveActivityManager.swift) + [`doitActivityWidget`](../ios/doit/doitActivityWidget/) | observes `TodoStore.agentActivityByTodoID` |
+| Live Activity widget     | [`AgentLiveActivityManager.swift`](../ios/doit/doit/Stores/AgentLiveActivityManager.swift) + [`doitActivityWidget`](../ios/doit/doitActivityWidget/) | observes `TodoStore.agentActivityByTodoID` while app is awake; runner sends ActivityKit pushes while suspended |
 
 ### Data flow
 
@@ -232,8 +232,30 @@ Hermes SSE  ──► events.translate ──► AgentActivityService
                 ┌─────────────────────────┼─────────────────────────┐
                 ▼                         ▼                         ▼
         TodoCard.statusText      AgentActivityCard          AgentLiveActivityManager
-        (single shimmer line)    (header animated card)     (Lock Screen + Dynamic Island)
+        (single shimmer line)    (header animated card)     (local ActivityKit lifecycle)
 ```
+
+### Lock Screen delivery
+
+Foreground and in-app activity surfaces still use the Realtime → `TodoStore`
+chain above. The Lock Screen / Dynamic Island has an additional delivery path
+because iOS suspends the app and its websocket while the phone is locked:
+
+```text
+AgentActivityService snapshot
+    ├─ Postgres row → Supabase Realtime → TodoStore → local Activity.update()
+    └─ runner → APNs liveactivity push → ActivityKit token → Lock Screen widget
+```
+
+`AgentLiveActivityManager` starts activities with `pushType: .token` and stores
+each ActivityKit token in `todo_live_activity_tokens`. The runner sends
+`liveactivity` APNs updates using the same normalized snapshot fields it writes
+to `todo_agent_activity`, so the in-app card and Lock Screen card keep the same
+copy, symbols, and terminal state.
+
+Silent `activity_sync` pushes still exist as a fallback: they wake the app when
+iOS allows it so `TodoStore.refreshAgentActivity(for:)` can repair local state.
+They are not the primary mechanism for locked-screen card animation.
 
 ### Snapshot contract
 

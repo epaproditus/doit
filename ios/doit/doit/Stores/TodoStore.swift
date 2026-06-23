@@ -694,6 +694,9 @@ final class TodoStore {
                 $0.error_message = nil
             }
         }
+        if status == .cancelled {
+            clearAgentActivityLocal(for: id)
+        }
         do {
             try await TodosAPI.setStatus(id, status)
         } catch {
@@ -767,6 +770,9 @@ final class TodoStore {
         let nextStatus: TodoStatus =
             optionID?.lowercased() == "cancel" ? .cancelled : phase.nextStatus
         patchTodoLocal(id: todo.id) { $0.status = nextStatus }
+        if nextStatus == .cancelled {
+            clearAgentActivityLocal(for: todo.id)
+        }
         do {
             try await TodosAPI.respond(
                 to: interaction.id,
@@ -1141,7 +1147,13 @@ final class TodoStore {
         let titles = Dictionary(
             uniqueKeysWithValues: todos.map { ($0.id, $0.title) }
         )
-        liveActivityManager.sync(activities: agentActivityByTodoID, titles: titles)
+        liveActivityManager.sync(activities: agentActivityByTodoID, titles: titles, userID: userID)
+    }
+
+    private func clearAgentActivityLocal(for todoID: UUID) {
+        guard agentActivityByTodoID.removeValue(forKey: todoID) != nil else { return }
+        syncLiveActivities()
+        scheduleSnapshotSave()
     }
 
     private func mergeRealtimeActivity(
