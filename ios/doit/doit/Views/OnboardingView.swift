@@ -12,6 +12,8 @@ struct OnboardingView: View {
     @Environment(AppSetupModeStore.self) private var setupMode
 
     @State private var code = ""
+    @State private var didCopyInstallerCommand = false
+    @State private var didCopyHermesPrompt = false
     @FocusState private var codeFieldFocused: Bool
 
     var body: some View {
@@ -220,13 +222,32 @@ struct OnboardingView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(prepared.install_command)
-                    .font(.system(size: 10, design: .monospaced))
-                    .textSelection(.enabled)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button("Copy installer command") {
-                    UIPasteboard.general.string = prepared.install_command
+                    .padding(.top, 2)
+                Button {
+                    copyInstallerCommand(prepared.install_command)
+                } label: {
+                    Label(
+                        didCopyInstallerCommand ? "Copied" : "Copy installer command",
+                        systemImage: didCopyInstallerCommand ? "checkmark" : "doc.on.doc"
+                    )
+                        .animation(nil, value: didCopyInstallerCommand)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+                        }
                 }
-                .font(.footnote.weight(.semibold))
+                .buttonStyle(PressScaleButtonStyle())
+                .padding(.top, 8)
             }
             .padding(16)
             .pairingCardStyle()
@@ -239,18 +260,48 @@ struct OnboardingView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Copy Hermes prompt") {
-                    UIPasteboard.general.string = hermesHelpPrompt(prepared)
+                Button {
+                    copyHermesPrompt(hermesHelpPrompt(prepared))
+                } label: {
+                    Label(
+                        didCopyHermesPrompt ? "Copied" : "Copy Hermes prompt",
+                        systemImage: didCopyHermesPrompt ? "checkmark" : "doc.on.doc"
+                    )
+                        .animation(nil, value: didCopyHermesPrompt)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+                        }
                 }
-                .font(.footnote.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                .buttonStyle(PressScaleButtonStyle())
             }
             .padding(16)
             .pairingCardStyle()
 
             capabilitySummary(status?.capabilities)
+        }
+    }
+
+    private func copyInstallerCommand(_ command: String) {
+        UIPasteboard.general.string = command
+        didCopyInstallerCommand = true
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            didCopyInstallerCommand = false
+        }
+    }
+
+    private func copyHermesPrompt(_ prompt: String) {
+        UIPasteboard.general.string = prompt
+        didCopyHermesPrompt = true
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            didCopyHermesPrompt = false
         }
     }
 
@@ -302,6 +353,14 @@ private extension View {
                     .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
+    }
+}
+
+private struct PressScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

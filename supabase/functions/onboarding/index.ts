@@ -237,7 +237,7 @@ serve(async (req) => {
                     `DOIT_CONNECTOR_TOKEN=${shellQuote(connectorToken)}`,
                     `DOIT_HERMES_URL=${shellQuote("http://127.0.0.1:8643")}`,
                     `bash -c "$(curl -fsSL ${shellQuote(installerURL)})"`,
-                ].join(" ");
+                ].join(" \\\n");
                 return json({
                     connector: data as ConnectorRow,
                     pairing_code: pairingCode,
