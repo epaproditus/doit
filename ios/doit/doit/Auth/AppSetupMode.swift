@@ -15,6 +15,7 @@ final class AppSetupModeStore {
     private static let storageKey = "app.setupMode"
 
     private(set) var mode: AppSetupMode?
+    private(set) var isHoldingForBYOPairing = false
 
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.storageKey) {
@@ -36,7 +37,16 @@ final class AppSetupModeStore {
         UserDefaults.standard.set(mode.rawValue, forKey: Self.storageKey)
     }
 
+    func holdForBYOPairing() {
+        isHoldingForBYOPairing = true
+    }
+
+    func releaseBYOPairingHold() {
+        isHoldingForBYOPairing = false
+    }
+
     func reset() {
+        isHoldingForBYOPairing = false
         mode = nil
         UserDefaults.standard.removeObject(forKey: Self.storageKey)
     }

@@ -126,7 +126,7 @@ struct IntegrationsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Connections are managed by your Hermes setup.", systemImage: "link")
                 .font(.headline)
-            Text("Doit will not start hosted Composio OAuth, create tool-router sessions, or store integration keys in BYO mode. If your Hermes already has Gmail, Calendar, Browserbase, or other tools connected, the connector uses those local capabilities.")
+            Text("Doit will not start hosted OAuth, create tool sessions, or store integration keys in BYO mode. If your Hermes already has Gmail, Calendar, browser tools, or other connections available, the connector uses those local capabilities.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

@@ -12,16 +12,20 @@ struct RootView: View {
                 authRoutedView
             case .byoConnector:
                 if AppConfig.byoConnectorEnabled {
-                    switch auth.state {
-                    case .loading:
-                        loadingView
-                    case .signedOut:
-                        BYOAnonymousStartView()
-                    case .signedIn(let userID):
-                        if onboarding.isReady {
-                            TodoListView(userID: userID)
-                        } else {
-                            OnboardingView()
+                    if setupMode.isHoldingForBYOPairing {
+                        SetupModeView()
+                    } else {
+                        switch auth.state {
+                        case .loading:
+                            loadingView
+                        case .signedOut:
+                            SetupModeView()
+                        case .signedIn(let userID):
+                            if onboarding.isReady {
+                                TodoListView(userID: userID)
+                            } else {
+                                OnboardingView()
+                            }
                         }
                     }
                 } else {

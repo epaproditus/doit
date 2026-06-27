@@ -3,18 +3,22 @@ import SwiftUI
 struct SetupModeView: View {
     private static let githubRepoURL = URL(string: "https://github.com/newmaterialco/doit")!
 
+    @Environment(AuthModel.self) private var auth
     @Environment(AppSetupModeStore.self) private var setupMode
     @Environment(\.openURL) private var openURL
+    @State private var isStartingBYO = false
+    @State private var byoErrorMessage: String?
 
     var body: some View {
-        ScrollView {
+        GeometryReader { proxy in
             VStack(spacing: 24) {
+                Spacer(minLength: 0)
+
                 Image("doit_Logo")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 120)
                     .accessibilityLabel("doit")
-                    .padding(.top, 56)
 
                 VStack(spacing: 8) {
                     Text("How do you want to use Doit?")
@@ -23,6 +27,7 @@ struct SetupModeView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320)
                 }
 
                 VStack(spacing: 12) {
@@ -35,19 +40,34 @@ struct SetupModeView: View {
 
                     if AppConfig.byoConnectorEnabled {
                         SetupModeCard(
-                            title: "Connect my Hermes",
+                            title: isStartingBYO ? "Starting BYO setup..." : "Connect my Hermes",
                             subtitle: "Use your existing Hermes on a VPS, Tailscale node, home server, or local machine.",
-                            systemImage: "point.3.connected.trianglepath.dotted",
-                            action: { setupMode.choose(.byoConnector) }
+                            systemImage: isStartingBYO ? "hourglass" : "app.connected.to.app.below.fill",
+                            action: { Task { await startBYOSetup() } }
                         )
                     }
                 }
+
+                if let byoErrorMessage {
+                    Text(byoErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320)
+                }
+
+                Rectangle()
+                    .fill(Color(.separator).opacity(0.5))
+                    .frame(height: 1)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 4)
 
                 VStack(spacing: 10) {
                     Text("Want to self-host / fork the app? We've open-sourced the repo below.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                        .frame(maxWidth: 300)
 
                     Button {
                         openURL(Self.githubRepoURL)
@@ -67,11 +87,30 @@ struct SetupModeView: View {
                     }
                     .buttonStyle(.plain)
                 }
-            }
+
+                Spacer(minLength: 0)
+                }
             .padding(.horizontal, 24)
             .padding(.bottom, 32)
+            .padding(.top, 32)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .background(AppSemanticColors.screenBackground.ignoresSafeArea())
+    }
+
+    private func startBYOSetup() async {
+        guard !isStartingBYO else { return }
+        isStartingBYO = true
+        defer { isStartingBYO = false }
+        do {
+            setupMode.choose(.byoConnector)
+            setupMode.holdForBYOPairing()
+            try await auth.signInAnonymously()
+            byoErrorMessage = nil
+        } catch {
+            setupMode.reset()
+            byoErrorMessage = "Couldn't start BYO setup. Check your connection and try again."
+        }
     }
 }
 
@@ -83,11 +122,11 @@ private struct SetupModeCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: systemImage)
                     .font(.title2)
                     .frame(width: 36)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(.primary)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.headline)
@@ -101,9 +140,16 @@ private struct SetupModeCard: View {
                 Image(systemName: "chevron.right")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
             }
             .padding(16)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
+            .frame(maxWidth: .infinity)
+            .background(.white, in: RoundedRectangle(cornerRadius: 18))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
         }
         .buttonStyle(.plain)
     }

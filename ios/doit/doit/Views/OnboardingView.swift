@@ -9,6 +9,7 @@ struct OnboardingView: View {
 
     @Environment(OnboardingModel.self) private var onboarding
     @Environment(AuthModel.self) private var auth
+    @Environment(AppSetupModeStore.self) private var setupMode
 
     @State private var code = ""
     @FocusState private var codeFieldFocused: Bool
@@ -16,12 +17,6 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
-            Image("doit_Logo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 110)
-                .accessibilityLabel("doit")
-                .padding(.bottom, 36)
 
             switch onboarding.phase {
             case .checking:
@@ -40,8 +35,8 @@ struct OnboardingView: View {
             }
 
             Spacer()
-            Button("Sign out") {
-                Task { await auth.signOut() }
+            Button(setupMode.isBYO ? "Back to Options" : "Sign out") {
+                Task { await leaveOnboarding() }
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -49,7 +44,6 @@ struct OnboardingView: View {
         }
         .padding(.horizontal, 24)
         .background(AppSemanticColors.screenBackground.ignoresSafeArea())
-        .animation(.default, value: onboarding.phase)
     }
 
     // MARK: - Invite code entry
@@ -114,6 +108,14 @@ struct OnboardingView: View {
         Task { await onboarding.redeem(code: code) }
     }
 
+    private func leaveOnboarding() async {
+        await auth.signOut()
+        onboarding.reset()
+        if setupMode.isBYO {
+            setupMode.reset()
+        }
+    }
+
     // MARK: - Creating
 
     private var creating: some View {
@@ -167,17 +169,46 @@ struct OnboardingView: View {
         status: BYOConnectorStatus?
     ) -> some View {
         VStack(spacing: 16) {
-            Text("Pair your Hermes connector")
-                .font(.title2.weight(.semibold))
-            Text("Doit will use your Hermes setup as-is. Your model keys, OAuth connections, memory files, tools, Browserbase, Composio, and TTS config stay on your machine.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pair your Hermes connector")
+                    .font(.title2.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Doit uses your Hermes setup as-is. Your keys, connections, memory, and tools stay on your machine.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                PairingStep(number: 1, text: "Copy the command below.")
+                PairingStep(number: 2, text: "Run it on the machine that can reach Hermes.")
+                PairingStep(number: 3, text: "Keep the connector running while you use Doit.")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Pairing code")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                HStack(alignment: .center) {
+                    Text("Pairing code")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        if status?.status == "online" {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        } else {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
+                        Text(status?.status == "online" ? "Connector found" : "Waiting for connector...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Text(prepared.pairing_code)
                     .font(.system(.title3, design: .monospaced).weight(.semibold))
                 Divider()
@@ -185,7 +216,7 @@ struct OnboardingView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text(prepared.install_command)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button("Copy command") {
@@ -194,17 +225,46 @@ struct OnboardingView: View {
                 .font(.footnote.weight(.semibold))
             }
             .padding(16)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+            .pairingCardStyle()
 
-            HStack(spacing: 8) {
-                ProgressView()
-                Text(status?.status == "online" ? "Connector found. Finishing setup..." : "Waiting for connector...")
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Need help?")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("If you already have Hermes running, paste this prompt into Hermes and ask it to help you run the connector.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Copy Hermes prompt") {
+                    UIPasteboard.general.string = hermesHelpPrompt(prepared)
+                }
+                .font(.footnote.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
             }
+            .padding(16)
+            .pairingCardStyle()
 
             capabilitySummary(status?.capabilities)
         }
+    }
+
+    private func hermesHelpPrompt(_ prepared: BYOConnectorPrepareResponse) -> String {
+        """
+        I want to connect my existing Hermes setup to the Doit iOS app using BYO connector mode.
+
+        Please help me figure out where to run this connector command. It should run on a machine that can reach my Hermes HTTP API, usually the same VPS/server where Hermes is already running.
+
+        Connector command:
+        \(prepared.install_command)
+
+        Please check:
+        1. Whether Hermes is running and what host/port I should use for --hermes-url.
+        2. Whether I need a Hermes API key for --hermes-api-key.
+        3. The exact command I should paste into my terminal.
+        4. How to keep the connector running after I close SSH.
+        """
     }
 
     @ViewBuilder
@@ -224,6 +284,37 @@ struct OnboardingView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private extension View {
+    func pairingCardStyle() -> some View {
+        self
+            .background(.white, in: RoundedRectangle(cornerRadius: 16))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
+    }
+}
+
+private struct PairingStep: View {
+    let number: Int
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text("\(number).")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12, alignment: .leading)
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.92)
         }
     }
 }

@@ -39,6 +39,7 @@ final class OnboardingModel {
 
     private var userID: UUID?
     private var setupMode: AppSetupMode = .hosted
+    private weak var setupModeStore: AppSetupModeStore?
     private var watchTask: Task<Void, Never>?
     private weak var connectivity: ConnectivityMonitor?
 
@@ -48,11 +49,17 @@ final class OnboardingModel {
 
     // MARK: - Lifecycle
 
-    func begin(userID: UUID, setupMode: AppSetupMode, connectivity: ConnectivityMonitor) {
+    func begin(
+        userID: UUID,
+        setupMode: AppSetupMode,
+        setupModeStore: AppSetupModeStore? = nil,
+        connectivity: ConnectivityMonitor
+    ) {
         if self.userID == userID, isReady { return }
         reset()
         self.userID = userID
         self.setupMode = setupMode
+        self.setupModeStore = setupModeStore
         self.connectivity = connectivity
         if UserDefaults.standard.bool(forKey: Self.cacheKey(userID, setupMode: setupMode)) {
             markReady()
@@ -72,6 +79,7 @@ final class OnboardingModel {
         watchTask?.cancel()
         watchTask = nil
         userID = nil
+        setupModeStore = nil
         connectivity = nil
         isReady = false
         isBusy = false
@@ -111,10 +119,12 @@ final class OnboardingModel {
         do {
             let prepared = try await OnboardingAPI.prepareBYOConnector()
             phase = .byoPairing(prepared, prepared.connector)
+            setupModeStore?.releaseBYOPairingHold()
             connectivity?.reportSuccess()
             startWatching()
         } catch {
             print("[onboarding] byo prepare failed: \(error)")
+            setupModeStore?.releaseBYOPairingHold()
             if connectivity?.reportFailure(error) != true {
                 phase = .failed(message: "Couldn't create a connector pairing. Check your connection and try again.")
             }

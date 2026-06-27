@@ -84,7 +84,9 @@ doit/
   Hermes. See [`docs/self-host.md`](docs/self-host.md).
 - **I want the app to control my existing Hermes**: read
   [`docs/byo-connector.md`](docs/byo-connector.md). This path is a developer
-  preview for hosted-sync BYO.
+  preview for hosted-sync BYO. It includes the in-app pairing flow, connector
+  command, and links to [Hermes Agent docs](https://hermes-agent.nousresearch.com/docs/)
+  for gateway-side troubleshooting.
 - **I want to contribute code**: start with [`CONTRIBUTING.md`](CONTRIBUTING.md)
   and [`docs/task-realtime.md`](docs/task-realtime.md).
 

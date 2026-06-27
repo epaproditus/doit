@@ -57,8 +57,69 @@ flowchart TD
    calls local Hermes, and writes task progress back to the hosted sync layer.
 
 The app communicates this boundary explicitly: Doit uses your Hermes setup
-as-is. Model keys, OAuth connections, memory files, tools, Browserbase,
-Composio, and TTS config remain owned by your Hermes setup.
+as-is. Model keys, OAuth connections, memory files, tools, browser automation,
+and voice config remain owned by your Hermes setup.
+
+## Pairing In The App
+
+This is the user-facing flow in the iOS app today:
+
+1. On the launch screen, tap **Connect my Hermes**.
+2. The app signs you in anonymously (no Apple account required) and opens the
+   **Pair your Hermes connector** screen.
+3. Copy the generated connector command from the app.
+4. Run it on a machine that can reach your Hermes HTTP API — usually the same
+   VPS or server where Hermes already runs.
+5. Keep the connector process running while you use Doit.
+6. When the app shows **Connector found**, pairing is complete and the normal
+   task UI opens.
+
+If you get stuck before the connector is running, use **Copy Hermes prompt** in
+the app and paste it into your existing Hermes chat. Hermes can help you find
+the right host, port, API key, and terminal command for your setup.
+
+## Hermes Setup And Documentation
+
+BYO connector mode assumes you already have a working Hermes gateway. Doit does
+not install or configure Hermes for you in this path.
+
+Start here if Hermes is not running yet, or if you need to verify the gateway,
+API key, tools, or memory setup:
+
+| Resource | Link |
+| --- | --- |
+| Hermes docs home | [hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/) |
+| Quickstart | [Getting started / quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) |
+| FAQ and troubleshooting | [FAQ & troubleshooting](https://hermes-agent.nousresearch.com/docs/getting-started/faq) |
+| Source repo | [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
+
+For operator-style deployment notes used by hosted Doit, see
+[`../hermes/setup.md`](../hermes/setup.md). That runbook is optional for BYO
+users who already manage their own Hermes install.
+
+## Ask Hermes For Help
+
+If you are less comfortable with SSH, ports, or systemd, paste a prompt like
+this into Hermes after copying the connector command from the app:
+
+```text
+I want to connect my existing Hermes setup to the Doit iOS app using BYO connector mode.
+
+Please help me figure out where to run this connector command. It should run on a machine that can reach my Hermes HTTP API, usually the same VPS/server where Hermes is already running.
+
+Connector command:
+<paste the command from the Doit app here>
+
+Please check:
+1. Whether Hermes is running and what host/port I should use for --hermes-url.
+2. Whether I need a Hermes API key for --hermes-api-key.
+3. The exact command I should paste into my terminal.
+4. How to keep the connector running after I close SSH.
+```
+
+Hermes is the best place to troubleshoot gateway health, API keys, profile
+files, tools, and local networking on your machine. Doit troubleshooting below
+covers only the connector and hosted sync layer.
 
 ## What Users Need Before Starting
 
@@ -72,8 +133,8 @@ Composio, and TTS config remain owned by your Hermes setup.
   Supabase project.
 
 They do **not** need Apple login for BYO connector mode. They also do not need
-to move model keys, Composio connections, Browserbase config, TTS config, tools,
-or memory files into Doit.
+to move model keys, OAuth connections, browser config, voice config, tools, or
+memory files into Doit.
 
 ## Where To Run The Connector
 
@@ -189,6 +250,15 @@ mobile sync story and self-managed push/Live Activity behavior.
 
 ## Troubleshooting
 
+Split the problem by layer:
+
+- **Hermes-side issues** (gateway not running, wrong port, missing API key,
+  tools/memory/profile problems): use the
+  [Hermes FAQ & troubleshooting](https://hermes-agent.nousresearch.com/docs/getting-started/faq)
+  docs or ask your Hermes agent directly.
+- **Doit connector issues** (pairing, token, Supabase sync): use the sections
+  below.
+
 ### The App Stays On “Waiting For Connector”
 
 Check that:
@@ -209,14 +279,18 @@ Check that:
 
 ### Hermes Runs But Integrations Do Not Work
 
-Doit does not create hosted Composio sessions in BYO mode. The user’s Hermes
-profile must already have the needed tools and OAuth connections configured.
+Doit does not create hosted OAuth/tool sessions in BYO mode. The user’s Hermes
+profile must already have the needed tools and connections configured. See the
+[Hermes tools documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools)
+and [MCP integration guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
 
 ### Model Or Memory Looks Different Than Hosted Doit
 
 That is expected. BYO mode treats Hermes as the source of truth. Model config,
 memory files, custom instructions, tools, and TTS are managed by the user’s
-Hermes setup, not by Doit.
+Hermes setup, not by Doit. See the
+[Hermes memory docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
+if memory behavior looks wrong on the Hermes side.
 
 ## Privacy
 

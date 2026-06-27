@@ -52,6 +52,7 @@ struct doitApp: App {
                         onboarding.begin(
                             userID: userID,
                             setupMode: setupMode.mode ?? .hosted,
+                            setupModeStore: setupMode,
                             connectivity: connectivity
                         )
                     case .signedOut:
