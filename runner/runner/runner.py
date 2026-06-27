@@ -117,6 +117,20 @@ _TIMEOUT_AUTH_USER_MESSAGE_TEMPLATE = (
     "in time. Try again and Doit will refresh the connection before running."
 )
 
+
+def _merge_excluded_user_ids(*groups: list[str] | None) -> list[str]:
+    """Preserve order while deduping user IDs excluded from hosted claims."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for user_id in group or []:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            merged.append(user_id)
+    return merged
+
+
 _GITHUB_REPO_URL_RE = re.compile(
     r"^https?://(?:www\.)?github\.com/([^/\s?#]+)/([^/\s?#]+?)(?:\.git)?/?$",
     re.IGNORECASE,
@@ -3852,8 +3866,11 @@ async def main_loop() -> None:
             )
             continue
 
+        byo_user_ids = db.list_byo_connector_user_ids()
+        todo_exclude_user_ids = _merge_excluded_user_ids(capped_users, byo_user_ids)
+
         try:
-            todo = db.claim_next_requested_todo(exclude_user_ids=capped_users)
+            todo = db.claim_next_requested_todo(exclude_user_ids=todo_exclude_user_ids)
         except Exception:
             log.exception("claim failed; will retry")
             todo = None
@@ -3863,7 +3880,7 @@ async def main_loop() -> None:
         if todo is None:
             if now - last_stale_scan >= _STALE_SCAN_INTERVAL_SECS:
                 last_stale_scan = now
-                todo = db.claim_stale_running_todo(exclude_user_ids=capped_users)
+                todo = db.claim_stale_running_todo(exclude_user_ids=todo_exclude_user_ids)
                 if todo is None:
                     stale_job = db.claim_stale_running_cron_job(
                         exclude_user_ids=capped_users

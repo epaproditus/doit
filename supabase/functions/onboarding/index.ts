@@ -226,7 +226,7 @@ serve(async (req) => {
                     .single();
                 if (error) throw error;
                 const installCommand = [
-                    "python -m runner.connector",
+                    "python3 -m runner.connector",
                     `--supabase-url "${SUPABASE_URL}"`,
                     `--supabase-anon-key "${SUPABASE_ANON_KEY}"`,
                     `--connector-token "${connectorToken}"`,

@@ -86,7 +86,18 @@ The connector entrypoint runs beside a user's existing Hermes gateway and claims
 only tasks for the paired anonymous BYO identity:
 
 ```bash
-python -m runner.connector \
+git clone https://github.com/newmaterialco/doit.git
+cd doit/runner
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Run the command from `doit/runner` so the nested `runner` Python package
+resolves correctly. On Ubuntu, prefer `python3`:
+
+```bash
+python3 -m runner.connector \
   --supabase-url "https://YOUR_PROJECT.supabase.co" \
   --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
   --connector-token "doit_conn_..." \
@@ -97,6 +108,12 @@ python -m runner.connector \
 The connector uses the public Supabase anon key plus a scoped connector token.
 Task claims and writes go through the connector Edge Function, so BYO users do
 not need service-role material.
+
+For VPS installs, run the connector under systemd using
+`WorkingDirectory=/path/to/doit/runner` and
+`ExecStart=/path/to/doit/runner/.venv/bin/python -m runner.connector ...`.
+See [`docs/byo-connector.md`](../docs/byo-connector.md) for the full user-facing
+setup guide and troubleshooting.
 
 ## Environment
 

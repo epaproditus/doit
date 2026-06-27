@@ -14,6 +14,8 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import httpx
+
 from .connector_api import ConnectorAPI
 from .events import translate
 from .hermes import HermesClient, HermesEndpoint
@@ -50,27 +52,66 @@ def _endpoint_parts(url: str) -> tuple[str, int]:
     return parsed.hostname, parsed.port or default_port
 
 
-def _capabilities() -> dict[str, str]:
+def _capabilities(*, hermes_status: str = "unchecked") -> dict[str, str]:
     return {
-        "Hermes": "reachable",
+        "Hermes": hermes_status,
         "Models": "managed by your Hermes",
         "Memory": "local to your Hermes profile",
         "Integrations": "managed by your Hermes",
     }
 
 
-async def _heartbeat_loop(api: ConnectorAPI, *, profile_name: str, endpoint_url: str) -> None:
-    capabilities = {
-        "Hermes": "reachable",
-        "Models": "managed by your Hermes",
-        "Memory": "local to your Hermes profile",
-        "Integrations": "managed by your Hermes",
-    }
+def _friendly_hermes_error(endpoint: HermesEndpoint, exc: BaseException) -> str:
+    base = endpoint.base_url
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return (
+            f"The connector is online, but it cannot reach Hermes at {base}. "
+            "Check that Hermes is running, the port is correct, and systemd is using the same URL."
+        )
+    if isinstance(exc, httpx.ReadTimeout):
+        return f"The connector reached Hermes at {base}, but Hermes did not respond in time."
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in {401, 403}:
+            return (
+                f"Hermes at {base} rejected the connector credentials. "
+                "Check whether --hermes-api-key is required and correct."
+            )
+        return f"Hermes at {base} rejected the task request with HTTP {status}."
+    return str(exc) or f"Hermes at {base} could not start the task."
+
+
+async def _check_hermes_health(endpoint: HermesEndpoint) -> tuple[bool, str]:
+    headers = {"Authorization": f"Bearer {endpoint.api_key}"} if endpoint.api_key else {}
+    try:
+        async with httpx.AsyncClient(
+            base_url=endpoint.base_url,
+            headers=headers,
+            timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0),
+        ) as client:
+            resp = await client.get("/health")
+        if resp.status_code < 400:
+            return True, "reachable"
+        if resp.status_code in {401, 403}:
+            return False, "auth failed"
+        return False, f"health HTTP {resp.status_code}"
+    except Exception as exc:
+        return False, _friendly_hermes_error(endpoint, exc)
+
+
+async def _heartbeat_loop(
+    api: ConnectorAPI,
+    *,
+    profile_name: str,
+    endpoint: HermesEndpoint,
+    endpoint_url: str,
+) -> None:
     while True:
+        _, hermes_status = await _check_hermes_health(endpoint)
         await api.heartbeat(
             profile_name=profile_name,
             endpoint_url=endpoint_url,
-            capabilities=capabilities,
+            capabilities=_capabilities(hermes_status=hermes_status),
         )
         await asyncio.sleep(_HEARTBEAT_INTERVAL_SECS)
 
@@ -146,10 +187,11 @@ async def _run_todo(
             await api.insert_step(todo_id=todo_id, kind="final", text="Done.")
             await api.update_todo(todo_id, {"status": "done", "completed_at": _iso_now()})
     except Exception as exc:
+        message = _friendly_hermes_error(endpoint, exc)
         log.exception("BYO connector task failed todo=%s", todo_id)
         with suppress(Exception):
-            await api.insert_step(todo_id=todo_id, kind="error", text=str(exc))
-            await api.update_todo(todo_id, {"status": "failed", "error_message": str(exc)})
+            await api.insert_step(todo_id=todo_id, kind="error", text=message)
+            await api.update_todo(todo_id, {"status": "failed", "error_message": message})
     finally:
         lease.cancel()
         with suppress(asyncio.CancelledError, Exception):
@@ -175,10 +217,11 @@ async def connector_loop() -> None:
         port=port,
         api_key=args.hermes_api_key,
     )
+    _, initial_hermes_status = await _check_hermes_health(endpoint)
     await api.register(
         profile_name=args.profile_name,
         endpoint_url=args.hermes_url,
-        capabilities=_capabilities(),
+        capabilities=_capabilities(hermes_status=initial_hermes_status),
     )
 
     gates = UserGates()
@@ -187,6 +230,7 @@ async def connector_loop() -> None:
         _heartbeat_loop(
             api,
             profile_name=args.profile_name,
+            endpoint=endpoint,
             endpoint_url=args.hermes_url,
         )
     )

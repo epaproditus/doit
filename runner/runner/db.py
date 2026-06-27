@@ -86,6 +86,20 @@ class DB:
     # Claiming work
     # ------------------------------------------------------------------
 
+    def list_byo_connector_user_ids(self) -> list[str]:
+        """Users whose tasks are owned by a BYO connector, not the hosted runner."""
+        try:
+            resp = (
+                self._client.table("byo_connectors")
+                .select("user_id")
+                .neq("status", "revoked")
+                .execute()
+            )
+            return [str(row["user_id"]) for row in (resp.data or []) if row.get("user_id")]
+        except Exception as e:
+            log.error("list_byo_connector_user_ids failed: %s", e)
+            return []
+
     def claim_next_preparing_todo(self) -> dict | None:
         """Atomically claim and return the oldest ``preparing`` todo.
 

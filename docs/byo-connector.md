@@ -127,8 +127,8 @@ covers only the connector and hosted sync layer.
 - The Hermes URL from the connector machine, usually
   `http://127.0.0.1:<port>` when the connector runs on the same host.
 - The Hermes API key if that gateway requires one.
-- Python and the Doit runner package available on the machine running the
-  connector.
+- Python 3.11+.
+- A local checkout of the Doit repo on the machine running the connector.
 - Outbound internet access from the connector machine to the hosted Doit
   Supabase project.
 
@@ -136,20 +136,102 @@ They do **not** need Apple login for BYO connector mode. They also do not need
 to move model keys, OAuth connections, browser config, voice config, tools, or
 memory files into Doit.
 
-## Where To Run The Connector
+## Install The Connector On A VPS
 
-### Same VPS As Hermes
+These steps assume Hermes is already running on the VPS and its gateway is
+listening on `http://127.0.0.1:8643`.
 
-This is the simplest path. SSH into the VPS and run the connector there:
+### 1. Verify Hermes From The VPS
+
+Run this on the same machine that will run the connector:
 
 ```bash
-python -m runner.connector \
+curl http://127.0.0.1:8643/health
+```
+
+If this fails, fix Hermes before pairing Doit. The connector can be online to
+Supabase while still unable to reach Hermes.
+
+### 2. Clone Doit
+
+```bash
+git clone https://github.com/newmaterialco/doit.git
+cd doit/runner
+```
+
+The working directory matters. The Python package lives at `runner/runner`, so
+`python3 -m runner.connector` should be run from `doit/runner`.
+
+### 3. Create A Virtual Environment
+
+Ubuntu 24.04 and other PEP 668 systems block global `pip install`, so use a
+venv:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 4. Run The Command From The App
+
+Copy the connector command shown in the iOS app and run it from `doit/runner`
+with the venv active. Use `python3` if your VPS does not provide `python`:
+
+```bash
+python3 -m runner.connector \
   --supabase-url "https://YOUR_PROJECT.supabase.co" \
   --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
   --connector-token "doit_conn_..." \
   --hermes-url "http://127.0.0.1:8643" \
   --hermes-api-key "YOUR_LOCAL_HERMES_API_KEY"
 ```
+
+You should see `BYO connector online` in the logs. The app should change from
+`Waiting for connector...` to `Connector found`.
+
+### 5. Run It With systemd
+
+For a VPS, run the connector as a service so it survives SSH disconnects and
+reboots. Create `/etc/systemd/system/doit-connector.service`:
+
+```ini
+[Unit]
+Description=Doit BYO Connector - Supabase to Hermes bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/path/to/doit/runner
+ExecStart=/path/to/doit/runner/.venv/bin/python -m runner.connector \
+  --supabase-url "https://YOUR_PROJECT.supabase.co" \
+  --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
+  --connector-token "doit_conn_..." \
+  --hermes-url "http://127.0.0.1:8643" \
+  --hermes-api-key "YOUR_LOCAL_HERMES_API_KEY"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now doit-connector.service
+sudo journalctl -u doit-connector.service --no-pager -n 50
+```
+
+## Where To Run The Connector
+
+### Same VPS As Hermes
+
+This is the simplest path. SSH into the VPS, follow the install steps above,
+then run the connector there:
 
 Use `127.0.0.1` because the connector and Hermes are on the same machine.
 
@@ -159,7 +241,7 @@ Run the connector on any machine that can reach the Hermes host over the private
 network:
 
 ```bash
-python -m runner.connector \
+python3 -m runner.connector \
   --supabase-url "https://YOUR_PROJECT.supabase.co" \
   --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
   --connector-token "doit_conn_..." \
@@ -175,7 +257,7 @@ private-network access to Hermes.
 This works for testing, but the connector must stay running:
 
 ```bash
-python -m runner.connector \
+python3 -m runner.connector \
   --supabase-url "https://YOUR_PROJECT.supabase.co" \
   --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
   --connector-token "doit_conn_..." \
@@ -200,10 +282,10 @@ The connector should:
 
 ## Running The Developer Preview Connector
 
-The connector entrypoint is:
+The connector entrypoint is run from `doit/runner`:
 
 ```bash
-python -m runner.connector \
+python3 -m runner.connector \
   --supabase-url "https://YOUR_PROJECT.supabase.co" \
   --supabase-anon-key "YOUR_SUPABASE_ANON_KEY" \
   --connector-token "doit_conn_..." \
@@ -267,6 +349,60 @@ Check that:
 - the connector token matches the command shown in the app
 - the connector machine can reach the Supabase URL over HTTPS
 - the required backend migration and Edge Functions are deployed
+
+### The App Says “No Hermes Profile Is Provisioned”
+
+This means a BYO task was picked up by the hosted runner instead of the BYO
+connector. BYO users intentionally do not have hosted Hermes profiles.
+
+Make sure the hosted runner has the BYO claim-isolation fix deployed, then
+create a new task. Existing failed tasks can be retried after deployment.
+
+### The App Says “All Connection Attempts Failed”
+
+This usually means the connector is online to Supabase, but the connector
+process cannot reach Hermes at the configured `--hermes-url`.
+
+Check from the same machine:
+
+```bash
+curl http://127.0.0.1:8643/health
+```
+
+If the connector runs under systemd, also check:
+
+```bash
+sudo journalctl -u doit-connector.service --no-pager -n 50
+```
+
+Common causes:
+
+- Hermes is not running.
+- Hermes is listening on a different port.
+- The connector service is using a different `--hermes-url` than your manual
+  shell test.
+- Hermes requires an API key and the service is missing `--hermes-api-key`.
+
+### Python Says “No Module Named runner”
+
+Run the connector from the nested runner directory:
+
+```bash
+cd /path/to/doit/runner
+source .venv/bin/activate
+python3 -m runner.connector ...
+```
+
+### pip Fails With “externally-managed-environment”
+
+Use a virtual environment instead of installing into the system Python:
+
+```bash
+cd /path/to/doit/runner
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ### The Connector Starts But Tasks Do Not Run
 
