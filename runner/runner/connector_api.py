@@ -28,11 +28,15 @@ class ConnectorAPI:
 
     async def call(self, action: str, **payload: Any) -> dict[str, Any]:
         body = {"action": action, **payload}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0)) as client:
-            resp = await client.post(self._endpoint, headers=self._headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0)) as client:
+                resp = await client.post(self._endpoint, headers=self._headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.HTTPStatusError) as exc:
+            print(f"connector call({action}) failed: {exc}")
+            return {}
 
     async def register(
         self,
