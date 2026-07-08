@@ -9,6 +9,11 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const BYO_CONNECTOR_DISABLED =
+    (Deno.env.get("DOIT_BYO_CONNECTOR_DISABLED") ?? "").toLowerCase() === "true";
+const BYO_DISABLED_MESSAGE =
+    Deno.env.get("DOIT_BYO_DISABLED_MESSAGE") ??
+    "BYO connector mode is temporarily paused.";
 
 const CONNECTOR_COLUMNS =
     "user_id,status,profile_name,endpoint_url,capabilities,last_heartbeat_at,created_at,updated_at";
@@ -43,6 +48,15 @@ serve(async (req) => {
     }
     if (req.method !== "POST") {
         return json({ error: "method_not_allowed" }, 405);
+    }
+    if (BYO_CONNECTOR_DISABLED) {
+        return json(
+            {
+                error: "byo_connector_disabled",
+                message: BYO_DISABLED_MESSAGE,
+            },
+            410,
+        );
     }
     if (!SUPABASE_SERVICE_ROLE_KEY) {
         return json({ error: "service_role_not_configured" }, 500);
