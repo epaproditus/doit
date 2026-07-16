@@ -150,15 +150,17 @@ async def _apply_model_setting(
             f" base_url={base_url}" if base_url else "",
         )
 
+        # Restart Hermes before reporting — if restart fails the
+        # exception handler reports "failed" so the server knows a
+        # retry is needed, rather than seeing "applied" on a dead gateway.
+        _restart_hermes(profile_name)
+
         # Report applied status
         await api.report_model_apply(
             apply_status="applied",
             provider=provider,
             model=model,
         )
-
-        # Restart Hermes
-        _restart_hermes(profile_name)
 
     except Exception as exc:
         log.error("failed to apply model setting: %s", exc)

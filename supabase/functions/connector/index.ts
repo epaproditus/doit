@@ -183,7 +183,7 @@ serve(async (req) => {
             let pendingModelSetting: Record<string, unknown> | null = null;
             const { data: msData } = await serviceClient
                 .from("agent_model_settings")
-                .select("provider, model, apply_status, apply_error")
+                .select("provider, model, base_url, apply_status, apply_error")
                 .eq("user_id", userId)
                 .eq("apply_status", "pending")
                 .maybeSingle();
@@ -263,6 +263,9 @@ serve(async (req) => {
             if (!apply_status || !["applied", "failed"].includes(apply_status)) {
                 return json({ error: "apply_status must be 'applied' or 'failed'" }, 400);
             }
+            if (!provider || !model) {
+                return json({ error: "provider and model are required" }, 400);
+            }
             const now = new Date().toISOString();
             const { error } = await serviceClient
                 .from("agent_model_settings")
@@ -272,6 +275,8 @@ serve(async (req) => {
                     last_applied_at: apply_status === "applied" ? now : null,
                 })
                 .eq("user_id", userId)
+                .eq("provider", provider)
+                .eq("model", model)
                 .maybeSingle();
             if (error) throw error;
             return json({ ok: true });
