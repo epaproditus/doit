@@ -67,6 +67,11 @@ serve(async (req) => {
         profile_name?: string | null;
         endpoint_url?: string | null;
         capabilities?: Record<string, unknown>;
+        // Model apply reporting
+        apply_status?: string;
+        apply_error?: string | null;
+        provider?: string;
+        model?: string;
     };
     try {
         body = await req.json();
@@ -252,6 +257,24 @@ serve(async (req) => {
                 .single();
             if (error) throw error;
             return json({ step: data });
+        }
+        case "report_model_apply": {
+            const { apply_status, provider, model, apply_error } = body;
+            if (!apply_status || !["applied", "failed"].includes(apply_status)) {
+                return json({ error: "apply_status must be 'applied' or 'failed'" }, 400);
+            }
+            const now = new Date().toISOString();
+            const { error } = await serviceClient
+                .from("agent_model_settings")
+                .update({
+                    apply_status,
+                    apply_error: apply_error ?? null,
+                    last_applied_at: apply_status === "applied" ? now : null,
+                })
+                .eq("user_id", userId)
+                .maybeSingle();
+            if (error) throw error;
+            return json({ ok: true });
         }
         default:
             return json({ error: "unknown_action" }, 400);
