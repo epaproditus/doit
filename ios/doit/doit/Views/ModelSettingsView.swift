@@ -12,11 +12,17 @@ struct ModelSettingsView: View {
     @State private var saving = false
     @State private var error: String?
 
+    // Self-managed (BYO/self-host) text fields
+    @State private var byoProvider = ""
+    @State private var byoModel = ""
+    @State private var byoBaseURL = ""
+
     var body: some View {
         List {
-            if setupMode.isBYO {
-                byoManagedByHermes
-            } else {
+            if setupMode.isSelfManaged {
+                byoFieldsSection
+            }
+
             if loading && catalog.isEmpty {
                 Section { ProgressView() }
             }
@@ -25,7 +31,7 @@ struct ModelSettingsView: View {
                 Section { Text(error).foregroundStyle(.red) }
             }
 
-            if !catalog.isEmpty {
+            if !setupMode.isSelfManaged && !catalog.isEmpty {
                 Section {
                     Picker("Provider", selection: $selectedProviderID) {
                         ForEach(catalog) { provider in
@@ -92,34 +98,33 @@ struct ModelSettingsView: View {
                         }
                     }
                 }
+            }
 
-                if let setting {
-                    Section {
-                        HStack {
-                            Text("Status")
-                            Spacer()
-                            Text(setting.apply_status.label)
-                                .foregroundStyle(statusColor(setting.apply_status))
-                        }
-                        if let error = setting.apply_error, !error.isEmpty {
-                            Text(error)
-                                .font(.footnote)
-                                .foregroundStyle(.red)
-                        }
-                    } header: {
-                        Text("Hermes")
-                    } footer: {
-                        Text("Changes are applied on the VM before the agent starts its next task.")
-                    }
-                }
-
+            if let setting {
                 Section {
-                    Button(saving ? "Saving..." : "Save Model Settings") {
-                        Task { await save() }
+                    HStack {
+                        Text("Status")
+                        Spacer()
+                        Text(setting.apply_status.label)
+                            .foregroundStyle(statusColor(setting.apply_status))
                     }
-                    .disabled(!canSave || saving)
+                    if let error = setting.apply_error, !error.isEmpty {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("Hermes")
+                } footer: {
+                    Text("Changes are applied on the VM before the agent starts its next task.")
                 }
             }
+
+            Section {
+                Button(saving ? "Saving..." : "Save Model Settings") {
+                    Task { await save() }
+                }
+                .disabled(!canSave || saving)
             }
         }
         .scrollContentBackground(.hidden)
@@ -137,14 +142,22 @@ struct ModelSettingsView: View {
         }
     }
 
-    private var byoManagedByHermes: some View {
+    private var byoFieldsSection: some View {
         Section {
-            Label("Model selection is managed by your Hermes setup.", systemImage: "cpu")
-            Text("Doit will not use hosted OpenRouter keys or rewrite your profile config in BYO mode. Change providers, model names, base URLs, and API keys in your Hermes environment.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            TextField("Provider (e.g. opencode-go)", text: $byoProvider)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+            TextField("Model (e.g. deepseek-v4-flash)", text: $byoModel)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+            TextField("Base URL (optional)", text: $byoBaseURL)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+                .keyboardType(.URL)
         } header: {
-            Text("BYO Hermes")
+            Text("Self-Managed Model")
+        } footer: {
+            Text("Enter your Hermes provider, model name, and optional base URL. Changes apply on the next Hermes agent run.")
         }
     }
 
@@ -157,6 +170,10 @@ struct ModelSettingsView: View {
     }
 
     private var canSave: Bool {
+        if setupMode.isSelfManaged {
+            return !byoProvider.trimmingCharacters(in: .whitespaces).isEmpty
+                && !byoModel.trimmingCharacters(in: .whitespaces).isEmpty
+        }
         guard let model = selectedModel else { return false }
         return selectedProvider != nil && !model.isLocked
     }
@@ -170,25 +187,33 @@ struct ModelSettingsView: View {
     }
 
     private func load() async {
-        guard !setupMode.isBYO else {
-            loading = false
-            error = nil
-            return
-        }
         loading = true
         defer { loading = false }
         do {
             let response = try await AgentSettingsAPI.getModelSettings()
             catalog = response.catalog
             setting = response.setting
-            if let setting = response.setting,
-               let provider = response.catalog.first(where: { $0.id == setting.provider }),
-               provider.models.contains(where: { $0.id == setting.model && !$0.isLocked }) {
-                selectedProviderID = setting.provider
-                selectedModelID = setting.model
-            } else if let provider = response.catalog.first {
-                selectedProviderID = provider.id
-                selectedModelID = selectableModels(for: provider).first?.id ?? ""
+
+            if setupMode.isSelfManaged {
+                if let s = response.setting {
+                    byoProvider = s.provider
+                    byoModel = s.model
+                    byoBaseURL = s.base_url ?? ""
+                } else {
+                    byoProvider = ""
+                    byoModel = ""
+                    byoBaseURL = ""
+                }
+            } else {
+                if let setting = response.setting,
+                   let provider = response.catalog.first(where: { $0.id == setting.provider }),
+                   provider.models.contains(where: { $0.id == setting.model && !$0.isLocked }) {
+                    selectedProviderID = setting.provider
+                    selectedModelID = setting.model
+                } else if let provider = response.catalog.first {
+                    selectedProviderID = provider.id
+                    selectedModelID = selectableModels(for: provider).first?.id ?? ""
+                }
             }
             error = nil
             connectivity.reportSuccess()
@@ -202,15 +227,25 @@ struct ModelSettingsView: View {
     }
 
     private func save() async {
-        guard !setupMode.isBYO else { return }
-        guard let model = selectedModel, !model.isLocked else { return }
         saving = true
         defer { saving = false }
         do {
-            setting = try await AgentSettingsAPI.updateModelSettings(
-                provider: selectedProviderID,
-                model: selectedModelID
-            )
+            if setupMode.isSelfManaged {
+                setting = try await AgentSettingsAPI.updateModelSettings(
+                    provider: byoProvider.trimmingCharacters(in: .whitespaces),
+                    model: byoModel.trimmingCharacters(in: .whitespaces),
+                    base_url: byoBaseURL.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? nil
+                        : byoBaseURL.trimmingCharacters(in: .whitespaces)
+                )
+            } else {
+                guard let model = selectedModel, !model.isLocked else { return }
+                setting = try await AgentSettingsAPI.updateModelSettings(
+                    provider: selectedProviderID,
+                    model: selectedModelID,
+                    base_url: nil
+                )
+            }
             error = nil
             connectivity.reportSuccess()
         } catch {
