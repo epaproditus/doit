@@ -173,7 +173,20 @@ serve(async (req) => {
                 .select(CONNECTOR_COLUMNS)
                 .single();
             if (error) throw error;
-            return json({ connector: data });
+
+            // Check for pending model settings
+            let pendingModelSetting: Record<string, unknown> | null = null;
+            const { data: msData } = await serviceClient
+                .from("agent_model_settings")
+                .select("provider, model, apply_status, apply_error")
+                .eq("user_id", userId)
+                .eq("apply_status", "pending")
+                .maybeSingle();
+            if (msData) {
+                pendingModelSetting = msData;
+            }
+
+            return json({ connector: data, pending_model_setting: pendingModelSetting });
         }
         case "claim_next": {
             return json({ todo: await claimTodo("requested") });
