@@ -31,6 +31,7 @@ struct AgentModelSetting: Codable, Hashable, Sendable {
     let user_id: UUID
     var provider: String
     var model: String
+    var base_url: String?
     var apply_status: AgentModelApplyStatus
     var apply_error: String?
     var last_applied_at: String?
