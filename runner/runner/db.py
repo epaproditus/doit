@@ -73,6 +73,7 @@ class AgentModelSetting:
     provider: str
     model: str
     apply_status: str | None = None
+    base_url: str | None = None
 
 
 class DB:
@@ -442,7 +443,7 @@ class DB:
     def get_pending_agent_model_setting(self, user_id: str) -> AgentModelSetting | None:
         settings_resp = (
             self._client.table("agent_model_settings")
-            .select("provider, model, apply_status")
+            .select("provider, model, apply_status, base_url")
             .eq("user_id", user_id)
             .eq("apply_status", "pending")
             .limit(1)
@@ -457,12 +458,13 @@ class DB:
             provider=setting["provider"],
             model=setting["model"],
             apply_status=setting.get("apply_status"),
+            base_url=setting.get("base_url"),
         )
 
     def get_agent_model_setting(self, user_id: str) -> AgentModelSetting | None:
         settings_resp = (
             self._client.table("agent_model_settings")
-            .select("provider, model, apply_status")
+            .select("provider, model, apply_status, base_url")
             .eq("user_id", user_id)
             .limit(1)
             .execute()
@@ -476,6 +478,7 @@ class DB:
             provider=setting["provider"],
             model=setting["model"],
             apply_status=setting.get("apply_status"),
+            base_url=setting.get("base_url"),
         )
 
     def get_memory_settings(self, user_id: str) -> dict:

@@ -15,7 +15,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-type ProviderId = "openai" | "anthropic" | "openrouter";
+type ProviderId = string;
 
 interface ModelOption {
     id: string;
@@ -131,6 +131,7 @@ interface AgentModelSetting {
     user_id: string;
     provider: ProviderId;
     model: string;
+    base_url: string | null;
     apply_status: "pending" | "applied" | "failed";
     apply_error: string | null;
     last_applied_at: string | null;
@@ -194,6 +195,7 @@ function sanitizeSetting(row: AgentModelSetting | null): AgentModelSetting | nul
         user_id: row.user_id,
         provider: row.provider,
         model: row.model,
+        base_url: row.base_url,
         apply_status: row.apply_status,
         apply_error: row.apply_error,
         last_applied_at: row.last_applied_at,
@@ -258,7 +260,7 @@ serve(async (req) => {
                 const premiumModelAccess = await hasPremiumModelAccess(serviceClient, userId);
                 const { data, error } = await serviceClient
                     .from("agent_model_settings")
-                    .select("user_id,provider,model,apply_status,apply_error,last_applied_at,updated_at")
+                    .select("user_id,provider,model,base_url,apply_status,apply_error,last_applied_at,updated_at")
                     .eq("user_id", userId)
                     .maybeSingle();
                 if (error) throw error;

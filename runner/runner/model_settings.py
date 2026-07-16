@@ -41,18 +41,31 @@ class AgentModelApplier:
         provider = HERMES_PROVIDER_BY_PROVIDER.get(setting.provider)
         key_env = KEY_ENV_BY_PROVIDER.get(setting.provider)
         key_attr = KEY_VALUE_ATTR_BY_PROVIDER.get(setting.provider)
-        if provider is None or key_env is None or key_attr is None:
-            raise RuntimeError(f"Unsupported model provider: {setting.provider}")
-        api_key = getattr(self._cfg, key_attr)
-        if not api_key:
-            raise RuntimeError(f"Doit is missing its global {key_env} for {setting.provider}.")
+
+        if provider is not None:
+            # Known (hosted) provider — resolve the Hermes provider name
+            # and require the API key to be configured.
+            if key_env is None or key_attr is None:
+                raise RuntimeError(f"Unsupported model provider: {setting.provider}")
+            api_key = getattr(self._cfg, key_attr)
+            if not api_key:
+                raise RuntimeError(
+                    f"Doit is missing its global {key_env} for {setting.provider}."
+                )
+        else:
+            # Self-hosted / unknown provider — write the provider string
+            # directly. The user manages their own API key and env vars.
+            provider = setting.provider
+            api_key = None
+            key_env = None
 
         profile_dir = self._profiles_dir / profile_name
         if not profile_dir.exists():
             raise RuntimeError(f"Hermes profile directory does not exist: {profile_dir}")
 
-        self._write_config(profile_dir / "config.yaml", provider, setting.model)
-        self._write_env(profile_dir / ".env", key_env, api_key)
+        self._write_config(profile_dir / "config.yaml", provider, setting.model, setting.base_url)
+        if key_env is not None and api_key is not None:
+            self._write_env(profile_dir / ".env", key_env, api_key)
         self._restart(profile_name)
         log.info(
             "applied model setting profile=%s provider=%s model=%s",
@@ -61,15 +74,16 @@ class AgentModelApplier:
             setting.model,
         )
 
-    def _write_config(self, path: Path, provider: str, model: str) -> None:
+    def _write_config(self, path: Path, provider: str, model: str, base_url: str | None = None) -> None:
         existing = path.read_text() if path.exists() else ""
-        model_block = "\n".join(
-            [
-                "model:",
-                f"  provider: {provider}",
-                f"  default: {model}",
-            ]
-        )
+        lines = [
+            "model:",
+            f"  provider: {provider}",
+            f"  default: {model}",
+        ]
+        if base_url:
+            lines.append(f"  base_url: {base_url}")
+        model_block = "\n".join(lines)
         updated = _replace_top_level_block(existing, "model", model_block)
         _atomic_write(path, updated)
 
