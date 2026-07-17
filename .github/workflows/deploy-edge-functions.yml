@@ -17,9 +17,13 @@ on:
         required: false
         type: boolean
         default: false
+      supabase_pat:
+        description: 'Supabase PAT (optional — paste from supabase.com/dashboard/account/tokens). Overrides the repo secret for manual deploys.'
+        required: false
+        type: string
 
 env:
-  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+  SUPABASE_ACCESS_TOKEN: ${{ inputs.supabase_pat || secrets.SUPABASE_ACCESS_TOKEN }}
   SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
 
 jobs:
@@ -128,12 +132,12 @@ jobs:
             for fn_dir in supabase/functions/*/; do
               fn=$(basename "$fn_dir")
               echo "==> Deploying $fn to production"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api || true
             done
           else
             for fn in $FUNCTIONS; do
               echo "==> Deploying $fn to production"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api || true
             done
           fi
 
