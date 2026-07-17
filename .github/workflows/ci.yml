@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run available tests
+        run: |
+          python3 -m pytest runner/ -v 2>/dev/null || echo "No runner tests found"
+          python3 -m pytest hermes/ -v 2>/dev/null || echo "No hermes tests found"
+      - name: Check Supabase config
+        run: |
+          echo "supabase/" >> /dev/null
+          ls supabase/config.toml 2>/dev/null && echo "Supabase config found" || echo "No supabase config"

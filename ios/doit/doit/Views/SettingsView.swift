@@ -158,7 +158,7 @@ struct SettingsView: View {
     private var modelSettingsButton: some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            if setupMode.isBYO {
+            if setupMode.isSelfManaged {
                 openRoute(.modelSettings)
             } else {
                 presentModelPicker()
@@ -287,12 +287,6 @@ struct SettingsView: View {
     }
 
     private func loadModelSettings() async {
-        guard !setupMode.isBYO else {
-            modelSettingsLoading = false
-            modelSettingsError = nil
-            selectedModelName = "Managed by Hermes"
-            return
-        }
         modelSettingsLoading = true
         defer { modelSettingsLoading = false }
         do {
@@ -336,7 +330,7 @@ struct SettingsView: View {
     }
 
     private func presentModelPicker() {
-        guard !setupMode.isBYO else {
+        guard !setupMode.isSelfManaged else {
             openRoute(.modelSettings)
             return
         }
@@ -358,7 +352,7 @@ struct SettingsView: View {
         provider: AgentModelProviderOption,
         model: AgentModelOption
     ) async {
-        guard !setupMode.isBYO else { return }
+        guard !setupMode.isSelfManaged else { return }
         guard !model.isLocked else { return }
         guard !modelSettingsSaving else { return }
         modelSettingsSaving = true
@@ -391,7 +385,6 @@ struct SettingsView: View {
     }
 
     private var displayedModelName: String? {
-        if setupMode.isBYO { return "Managed by Hermes" }
         return selectedModelName ?? (cachedModelDisplayName.isEmpty ? nil : cachedModelDisplayName)
     }
 

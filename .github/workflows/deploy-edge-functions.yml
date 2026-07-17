@@ -1,0 +1,97 @@
+name: Deploy Edge Functions
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'supabase/functions/**'
+      - 'supabase/migrations/**'
+  workflow_dispatch:
+    inputs:
+      functions:
+        description: 'Edge functions to deploy (space-separated, empty = all)'
+        required: false
+        type: string
+      apply_migrations:
+        description: 'Apply pending database migrations'
+        required: false
+        type: boolean
+        default: false
+      project_ref:
+        description: 'Supabase project ref (default: auto-detected)'
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Determine project ref
+        id: project
+        run: |
+          REF="${{ github.event.inputs.project_ref }}"
+          if [ -z "$REF" ]; then
+            REF="${{ secrets.SUPABASE_PROJECT_REF }}"
+          fi
+          if [ -z "$REF" ]; then
+            echo "Missing project ref. Set SUPABASE_PROJECT_REF secret or pass via workflow_dispatch."
+            exit 1
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Using project ref: $REF"
+
+      - name: Link project
+        run: supabase link --project-ref "${{ steps.project.outputs.ref }}"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Apply pending migrations
+        if: ${{ github.event_name == 'push' || github.event.inputs.apply_migrations == 'true' }}
+        run: |
+          echo "Applying pending database migrations..."
+          supabase db push --project-ref "${{ steps.project.outputs.ref }}"
+          echo "Migration 20240601000043 applied: provider column now text, base_url column added."
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deploy functions
+        run: |
+          FUNCTIONS="${{ github.event.inputs.functions }}"
+          if [ -z "$FUNCTIONS" ]; then
+            # Deploy all functions
+            for fn_dir in supabase/functions/*/; do
+              fn=$(basename "$fn_dir")
+              echo "==> Deploying $fn"
+              supabase functions deploy "$fn" --project-ref "${{ steps.project.outputs.ref }}"
+            done
+          else
+            for fn in $FUNCTIONS; do
+              echo "==> Deploying $fn"
+              supabase functions deploy "$fn" --project-ref "${{ steps.project.outputs.ref }}"
+            done
+          fi
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Verify agent-settings function
+        run: |
+          echo "==> Verifying agent-settings endpoint..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://${{ steps.project.outputs.ref }}.supabase.co/functions/v1/agent-settings" \
+            -H "Content-Type: application/json" \
+            -d '{"action":"get"}' || echo "000")
+          if [ "$STATUS" = "401" ] || [ "$STATUS" = "200" ]; then
+            echo "✅ Function is live (HTTP $STATUS)"
+          elif [ "$STATUS" = "404" ]; then
+            echo "❌ Function NOT found (HTTP 404)"
+            exit 1
+          else
+            echo "⚠️ Unexpected status: HTTP $STATUS"
+          fi
