@@ -287,10 +287,10 @@ struct SettingsView: View {
     }
 
     private func loadModelSettings() async {
-        // In BYO mode, model settings are managed externally.
+        // In self-managed mode, model settings are managed externally.
         // Skip the Edge Function call to avoid 404 errors when
         // the function isn't deployed to the user's project.
-        guard !setupMode.isBYO else {
+        guard !setupMode.isSelfManaged else {
             modelSettingsLoading = false
             modelSettingsError = nil
             return
