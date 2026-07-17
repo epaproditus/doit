@@ -2,89 +2,86 @@
 
 ## Problem
 
-The `agent-settings` Edge Function is not deployed on the production Supabase project (`nportxmsauhezjdubsma`). The iOS app calls this function to load model settings, and the new ungated self-managed model feature exposes this code path. Without the function, users see:
+The `agent-settings` Supabase Edge Function is not deployed on the production
+project (`nportxmsauhezjdubsma`). The iOS app calls this function to load
+model settings, and the new ungated self-managed model feature (PLY-308)
+exposes this code path. Without the function, users see:
 
 > Couldn't load model settings: Edge Function returned a non-2xx status code: 404
 
 ## Current State
 
-### Dev project (qjeutitqgdsasccxfxdy)
-- Function IS deployed (returns catalog on GET with valid auth)
-- But running **old code** — update with `base_url` returns `unsupported_provider`
-- Migration `20240601000043` (base_url column + provider->text) NOT applied
-
-### Production project (nportxmsauhezjdubsma)
-- Function NOT deployed — returns 404
-- This is where the iOS app hits the error
-- This is the project targeted in `/etc/doit/connector.env`
-
-### Code (on main, already pushed)
-- `supabase/functions/agent-settings/index.ts` — correct PLY-308 logic (skips catalog validation when base_url is present)
-- `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql` — provider->text, adds base_url column
-- `scripts/deploy-agent-settings.sh` — deploy script with per-project anon keys and DB password fallback
-- `scripts/fix-agent-settings-deploy.sh` — one-shot fix script
-- `scripts/deploy-edge-functions.sh` — generic deploy script
-- `.github/workflows/deploy-edge-functions.yml` — CI/CD auto-deploy on push to supabase/ paths
-- `ios/doit/Config/Local.xcconfig` — points to dev project (correct)
-
-## Blocker
-
-The Supabase PAT on this server (`sbp_e72f...`) does NOT have access to either project's Supabase organization. Management API returns 401 Unauthorized. Cannot deploy functions or apply migrations from this environment.
+| Project | Ref | agent-settings | Migration #43 |
+|---------|-----|---------------|---------------|
+| iOS Dev | `qjeutitqgdsasccxfxdy` | Deployed (old code — missing base_url support) | Not applied |
+| Production | `nportxmsauhezjdubsma` | **Not deployed — returns 404** | Not applied |
 
 ## How to Deploy
 
-### Option A: Manual deploy from Mac (preferred)
+### Prerequisites (one-time)
 
 ```bash
-# 1. Prerequisites
-cd ~/path/to/doit
-git pull origin main
-npm install -g supabase      # if not installed
-supabase login               # opens browser — generates new PAT
+npm install -g supabase
+supabase login                  # opens browser for PAT
+git checkout main && git pull   # latest code
+```
 
-# 2. Deploy to DEV project (re-deploy with latest code)
+Get the service role keys from **Supabase Dashboard > Project Settings > API**:
+
+| Project | Dashboard URL |
+|---------|--------------|
+| Dev | https://supabase.com/dashboard/project/qjeutitqgdsasccxfxdy |
+| Production | https://supabase.com/dashboard/project/nportxmsauhezjdubsma |
+
+### Deploy (from Mac)
+
+```bash
+cd ~/path/to/doit
+
+# Set service role keys (get from dashboard)
+export DOIT_DEV_SERVICE_ROLE_KEY=eyJ...    # dev project key
+export DOIT_PROD_SERVICE_ROLE_KEY=eyJ...   # production project key
+
+# Deploy to BOTH projects + apply migrations
+./scripts/deploy-all-projects.sh
+```
+
+### Deploy individually (if script doesn't work)
+
+```bash
+# Deploy to DEV (re-deploy with latest code + migration)
 SUPABASE_PROJECT_REF=qjeutitqgdsasccxfxdy \
 DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
 ./scripts/deploy-agent-settings.sh
 
-# 3. Deploy to PRODUCTION project (fix the 404)
+# Deploy to PRODUCTION (fix the 404 + migration)
 SUPABASE_PROJECT_REF=nportxmsauhezjdubsma \
 DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
 ./scripts/deploy-agent-settings.sh
 ```
 
-The `DOIT_SUPABASE_SERVICE_ROLE_KEY` is found at:
-Supabase Dashboard > Project Settings > API > service_role key
+### Via GitHub Actions
 
-### Option B: GitHub Actions
+Set these repo secrets then trigger the workflow:
+- `SUPABASE_ACCESS_TOKEN` — PAT with Management API access to both projects
+- `SUPABASE_PROJECT_REF` — default project ref
 
-Add these repo secrets, then trigger the workflow:
-- `SUPABASE_ACCESS_TOKEN` — PAT with access to the project's org
-- `SUPABASE_PROJECT_REF` — `nportxmsauhezjdubsma`
+Go to: **Actions > Deploy Edge Functions > Run workflow** (check "apply_migrations")
 
-Go to: Actions > Deploy Edge Functions > Run workflow
-Check "apply_migrations" = true
+### Manual (Supabase Dashboard)
 
-### Option C: Supabase Dashboard (manual)
-
-1. Open https://supabase.com/dashboard/project/nportxmsauhezjdubsma
-2. SQL Editor > Run the migration at `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql`
-3. Edge Functions > Create "agent-settings" with code from `supabase/functions/agent-settings/index.ts`
-4. Set 3 secrets: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
-
-### Option D: From any machine with a valid PAT
-
-```bash
-SUPABASE_ACCESS_TOKEN=sbp_... \
-SUPABASE_PROJECT_REF=nportxmsauhezjdubsma \
-./scripts/deploy-edge-functions.sh agent-settings
-```
+1. Open `https://supabase.com/dashboard/project/nportxmsauhezjdubsma`
+2. **SQL Editor** → Run the migration at `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql`
+3. **Edge Functions** → Create "agent-settings" with code from `supabase/functions/agent-settings/index.ts`
+4. **Settings** → Set 3 secrets: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+5. Repeat for project `qjeutitqgdsasccxfxdy`
 
 ## Verification
 
-After deploy, the production endpoint should return 401 (function exists, needs auth) not 404:
+After deploy, both projects should return HTTP 401 (not 404):
 
 ```bash
+# Should return 401 (function exists, auth required)
 curl -s -o /dev/null -w '%{http_code}' -X POST \
   https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
   -H 'Content-Type: application/json' \
@@ -92,16 +89,19 @@ curl -s -o /dev/null -w '%{http_code}' -X POST \
 # Expected: 401
 ```
 
-With a valid JWT:
+With a valid JWT (from the iOS app):
 ```bash
 curl -s -X POST \
   https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <valid_jwt>' \
   -d '{"action":"get"}'
-# Expected: {"catalog": [...], "setting": ..., "default_selection": ...}
+# Expected: {"catalog": [...], "setting": ..., "default_selection": {...}}
+```
 
-# Self-managed update with base_url should work:
+### Self-managed save test
+```bash
+# Should succeed (no catalog validation when base_url provided)
 curl -s -X POST \
   https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
   -H 'Content-Type: application/json' \
@@ -110,14 +110,3 @@ curl -s -X POST \
 # Expected: {"setting": {"provider": "opencode-go", ...}}
 # NOT: {"error":"unsupported_provider"}
 ```
-
-## Files Changed
-
-- `supabase/functions/agent-settings/index.ts` — PLY-308 base_url bypass logic (already on main)
-- `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql` — schema update (already on main)
-- `scripts/deploy-agent-settings.sh` — per-project anon keys + DB password fallback
-- `scripts/fix-agent-settings-deploy.sh` — one-shot fix script (already on main)
-- `scripts/deploy-edge-functions.sh` — generic deploy script (already on main)
-- `.github/workflows/deploy-edge-functions.yml` — CI/CD workflow (already on main)
-- `ios/doit/Config/Local.xcconfig` — iOS config (already on main)
-- `DEPLOY-PLY-309.md` — this file

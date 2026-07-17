@@ -204,7 +204,7 @@ function sanitizeSetting(row: AgentModelSetting | null): AgentModelSetting | nul
 }
 
 async function hasPremiumModelAccess(
-    serviceClient: ReturnType<typeof createClient>,
+    serviceClient: any,
     userId: string,
 ): Promise<boolean> {
     const { data, error } = await serviceClient
