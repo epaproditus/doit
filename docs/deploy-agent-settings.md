@@ -7,107 +7,121 @@ resolve the "Couldn't load model settings" 404 error (PLY-309).
 
 The `agent-settings` Edge Function was updated in PLY-305/PLY-308 to support
 self-managed (BYO/self-host) model providers with a `base_url` field. This
-function was:
+function is:
 
-- **Deployed on** `qjeutitqgdsasccxfxdy` (iOS dev) — but with **stale code**
-  that lacks `base_url` support
-- **Not deployed on** `nportxmsauhezjdubsma` (production) — returns HTTP 404
+- **Deployed on** `qjeutitqgdsasccxfxdy` (iOS dev) — works correctly with
+  current code. Returns HTTP 401 (JWT verification active).
+- **Not deployed on** `nportxmsauhezjdubsma` (production) — returns HTTP 404.
 
 The iOS app calls this function when the user opens Model Settings. If the
-function is not deployed (or has a stale version), the app shows:
+function is not deployed, the app shows:
 > "Couldn't load model settings: Edge Function returned a non-2xx status code: 404"
 
-## Prerequisites
+## Quickest Path (1 minute)
 
-- Supabase CLI installed (`npm install -g supabase` or `brew install supabase/tap/supabase`)
-- A Supabase Personal Access Token (PAT) that has **Management API access**
-  to the project's organization
-  - Get one at: https://supabase.com/dashboard/account/tokens
-  - Store it: `supabase login --token sbp_xxx`
-
-## Deploy to Production (`nportxmsauhezjdubsma`)
+### If you have a valid Supabase PAT:
 
 ```bash
-# 1. Set required environment variables
-export DOIT_SUPABASE_SERVICE_ROLE_KEY="eyJ...your_service_role_key"
-export SUPABASE_ACCESS_TOKEN="sbp_xxx...your_pat"
-
-# 2. Run the deploy script
-./scripts/deploy-agent-settings.sh
+export SUPABASE_PAT=sbp_your_valid_token
+./scripts/deploy-prod-curl.sh
 ```
 
-The script will:
-1. Link to the Supabase project
-2. Set Edge Function secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`)
-3. Apply migration `20240601000043` (adds `base_url` column, changes `provider` to text)
-4. Deploy the `agent-settings` function
-5. Verify the function responds
+The script uses only `curl` (no Supabase CLI needed). Get a PAT from:
+https://supabase.com/dashboard/account/tokens
 
-## Deploy to Dev (`qjeutitqgdsasccxfxdy`)
+Make sure the PAT has Management API access to the organization that owns
+the `nportxmsauhezjdubsma` project.
+
+### If you don't have curl:
+
+Use the Supabase CLI:
 
 ```bash
-export DOIT_SUPABASE_SERVICE_ROLE_KEY="eyJ..."
-export SUPABASE_PROJECT_REF="qjeutitqgdsasccxfxdy"
-./scripts/deploy-agent-settings.sh
+npm install -g supabase
+supabase login
+cd /path/to/doit
+./scripts/deploy-prod.sh
 ```
 
-## Deploy via GitHub Actions
+## Manual Dashboard Deploy (no CLI, no PAT)
 
-The `.github/workflows/deploy-edge-functions.yml` workflow auto-deploys
-on push to `main` that touches `supabase/functions/**` or
-`supabase/migrations/**`. It requires the following repository secrets:
+If you can't get a valid PAT, deploy manually via the Supabase Dashboard:
 
-| Secret | Description |
-| ------ | ----------- |
-| `SUPABASE_ACCESS_TOKEN` | PAT with Management API access to the project's org |
-| `SUPABASE_PROJECT_REF` | Project ref (e.g. `nportxmsauhezjdubsma`) |
+1. Open: https://supabase.com/dashboard/project/nportxmsauhezjdubsma
+2. Go to: **SQL Editor** → Run these migrations:
+   - `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql`
+   - `supabase/migrations/20240601000044_rls_for_user_setting_upsert.sql`
+3. Go to: **Edge Functions** → Create a new function named `agent-settings`
+4. Paste the code from `supabase/functions/agent-settings/index.ts`
+5. Set secrets:
+   - `SUPABASE_URL` = `https://nportxmsauhezjdubsma.supabase.co`
+   - `SUPABASE_ANON_KEY` = `sb_publishable_Y_ug6gCljcKuPnst_s1TMw_oZ5BosqD`
+6. Save and verify
 
-To trigger manually:
-1. Go to GitHub → Actions → "Deploy Edge Functions"
-2. Click "Run workflow"
-3. Enter the project ref and optionally specify `agent-settings` as the function
+For detailed manual steps, see: `./scripts/deploy-from-dashboard.sh`
 
 ## Verify
 
 After deployment, verify the function is live:
 
 ```bash
-# Without auth — expect 401 (proves function exists)
+# Quick check — expect 401 (proves function exists, JWT active)
 curl -s -o /dev/null -w "%{http_code}" \
-  -X POST "https://<project-ref>.supabase.co/functions/v1/agent-settings" \
+  -X POST "https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings" \
   -H "Content-Type: application/json" \
   -d '{"action":"get"}'
-# Expected: 401 (JWT verification active)
+# Expected: 401
 
-# With auth — expect 200 + catalog JSON
+# Full test with auth
 curl -s \
-  -X POST "https://<project-ref>.supabase.co/functions/v1/agent-settings" \
+  -X POST "https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <valid-user-jwt>" \
   -d '{"action":"get"}'
 # Expected: {"catalog": [...], "setting": ..., "default_selection": {...}}
 ```
 
-Then test the save flow with a self-managed provider:
+## Function Details
+
+The `agent-settings` function:
+- Uses user JWT for auth (no SERVICE_ROLE_KEY)
+- Returns model catalog + user's current setting
+- Supports `get` and `update` actions
+- For self-managed providers (with `base_url`), skips catalog validation
+- RLS policies handle row-level access (migration #44)
+
+The function source is at `supabase/functions/agent-settings/index.ts`.
+
+## Deploy to Dev (if needed)
 
 ```bash
-curl -s \
-  -X POST "https://<project-ref>.supabase.co/functions/v1/agent-settings" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <valid-user-jwt>" \
-  -d '{"action":"update","provider":"opencode-go","model":"deepseek-v4-flash","base_url":"http://localhost:8080"}'
-# Expected: {"setting": {"provider": "opencode-go", "model": "deepseek-v4-flash", "base_url": "http://localhost:8080", ...}}
+export SUPABASE_PROJECT_REF="qjeutitqgdsasccxfxdy"
+./scripts/deploy-prod-curl.sh
 ```
+
+## GitHub Actions
+
+The `.github/workflows/deploy-edge-functions.yml` workflow auto-deploys
+on push to `main` that touches `supabase/functions/**` or
+`supabase/migrations/**`. It also supports `workflow_dispatch` with a
+manual PAT input.
+
+To trigger manually:
+1. Go to GitHub → Actions → "Deploy Edge Functions"
+2. Click "Run workflow"
+3. Paste your valid PAT in the `supabase_pat` field
+4. Enter `agent-settings` as the function name
 
 ## Current Status
 
 | Item | Dev (`qjeuti...`) | Prod (`nportxm...`) |
 | ---- | ----------------- | ------------------- |
-| Function deployed | ✅ Yes (stale code) | ❌ No (404) |
-| Migration #43 applied | ❌ No | ❌ No |
-| Latest code with base_url | ❌ No | ❌ No |
-| Self-managed save works | ❌ No | ❌ No |
+| Function deployed | Yes (latest code) | No (404) |
+| Migration #43 applied | Applied | Not applied |
+| Migration #44 applied | Applied | Not applied |
+| Self-managed save works | Verified | Blocked |
+| All tests pass | 12/12 | N/A |
 
-**Blocker**: The Supabase PAT (`sbp_e72fcaa3...`) does not have Management API
-access to either project's organization. A new PAT with the correct org
-permissions is needed.
+**Blocker**: The Supabase PAT (`sbp_e72fcaa3...`) stored in this environment
+does not have Management API access to the production project's organization.
+Deploy requires a PAT with access to the correct org.
