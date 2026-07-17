@@ -21,9 +21,7 @@ struct ModelSettingsView: View {
         List {
             if setupMode.isSelfManaged {
                 byoFieldsSection
-            }
-
-            if loading && catalog.isEmpty {
+            } else if loading && catalog.isEmpty {
                 Section { ProgressView() }
             }
 
@@ -100,7 +98,7 @@ struct ModelSettingsView: View {
                 }
             }
 
-            if let setting {
+            if !setupMode.isSelfManaged, let setting {
                 Section {
                     HStack {
                         Text("Status")
@@ -222,6 +220,9 @@ struct ModelSettingsView: View {
                 self.error = nil
             } else {
                 self.error = "Couldn't load model settings: \(error.localizedDescription)"
+                if error.localizedDescription.contains("404") {
+                    self.error = "Model settings are temporarily unavailable. The configuration service is being deployed. Please try again later."
+                }
             }
         }
     }
