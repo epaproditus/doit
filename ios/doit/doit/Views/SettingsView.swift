@@ -331,7 +331,12 @@ struct SettingsView: View {
             if connectivity.reportFailure(error) {
                 modelSettingsError = nil
             } else {
-                modelSettingsError = "Couldn't load model settings: \(error.localizedDescription)"
+                let msg = error.localizedDescription
+                if msg.contains("404") || msg.contains("not found") || msg.contains("NOT_FOUND") {
+                    modelSettingsError = "Model settings are temporarily unavailable. Make sure the agent-settings Edge Function is deployed to your Supabase project."
+                } else {
+                    modelSettingsError = "Couldn't load model settings: \(msg)"
+                }
             }
             print("[settings][model] load failed error=\(error.localizedDescription)")
         }
