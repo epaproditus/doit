@@ -8,7 +8,7 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 test: ## Run all runner tests
-	cd runner && source .venv/bin/activate && python3 -m pytest tests/ -v --tb=short -k "not test_mirror_memory_cli"
+	cd runner && bash -c 'source .venv/bin/activate && python3 -m pytest tests/ -v --tb=short -k "not test_mirror_memory_cli"'
 
 status: ## Show edge function deployment status for both projects
 	@./scripts/verify-deploy-status.sh
