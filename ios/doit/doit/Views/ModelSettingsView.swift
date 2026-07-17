@@ -216,7 +216,12 @@ struct ModelSettingsView: View {
             if connectivity.reportFailure(error) {
                 self.error = nil
             } else {
-                self.error = "Couldn't load model settings: \(error.localizedDescription)"
+                let msg = error.localizedDescription
+                if msg.contains("404") || msg.contains("not found") {
+                    self.error = "Model settings are temporarily unavailable. The configuration service is still being deployed."
+                } else {
+                    self.error = "Couldn't load model settings: \(msg)"
+                }
             }
         }
     }
