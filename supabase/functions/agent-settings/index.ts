@@ -247,6 +247,7 @@ serve(async (req) => {
         action?: string;
         provider?: string;
         model?: string;
+        base_url?: string | null;
     };
     try {
         body = await req.json();
@@ -272,27 +273,34 @@ serve(async (req) => {
             }
             case "update": {
                 const premiumModelAccess = await hasPremiumModelAccess(serviceClient, userId);
-                const provider = providerFor(body.provider);
-                if (!provider) {
-                    return json({ error: "unsupported_provider" }, 400);
-                }
-                if (!modelIsSupported(provider, body.model)) {
-                    return json({ error: "unsupported_model" }, 400);
-                }
-                if (!modelIsSelectable(provider, body.model, premiumModelAccess)) {
-                    return json({ error: "model_locked" }, 403);
+                const baseUrl = body.base_url ?? null;
+
+                // Self-managed (BYO / self-host): skip catalog validation.
+                // Hosted mode: validate provider and model against the catalog.
+                if (!baseUrl) {
+                    const provider = providerFor(body.provider);
+                    if (!provider) {
+                        return json({ error: "unsupported_provider" }, 400);
+                    }
+                    if (!modelIsSupported(provider, body.model)) {
+                        return json({ error: "unsupported_model" }, 400);
+                    }
+                    if (!modelIsSelectable(provider, body.model, premiumModelAccess)) {
+                        return json({ error: "model_locked" }, 403);
+                    }
                 }
 
                 const { data, error } = await serviceClient
                     .from("agent_model_settings")
                     .upsert({
                         user_id: userId,
-                        provider: provider.id,
-                        model: body.model,
+                        provider: body.provider!,
+                        model: body.model!,
+                        base_url: baseUrl,
                         apply_status: "pending",
                         apply_error: null,
                     })
-                    .select("user_id,provider,model,apply_status,apply_error,last_applied_at,updated_at")
+                    .select("user_id,provider,model,base_url,apply_status,apply_error,last_applied_at,updated_at")
                     .single();
                 if (error) throw error;
 

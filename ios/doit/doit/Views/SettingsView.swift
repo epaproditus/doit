@@ -287,12 +287,6 @@ struct SettingsView: View {
     }
 
     private func loadModelSettings() async {
-        guard !setupMode.isBYO else {
-            modelSettingsLoading = false
-            modelSettingsError = nil
-            selectedModelName = "Managed by Hermes"
-            return
-        }
         modelSettingsLoading = true
         defer { modelSettingsLoading = false }
         do {
@@ -391,7 +385,6 @@ struct SettingsView: View {
     }
 
     private var displayedModelName: String? {
-        if setupMode.isBYO { return "Managed by Hermes" }
         return selectedModelName ?? (cachedModelDisplayName.isEmpty ? nil : cachedModelDisplayName)
     }
 

@@ -11,19 +11,22 @@ enum AgentSettingsAPI {
 
     static func updateModelSettings(
         provider: String,
-        model: String
+        model: String,
+        base_url: String? = nil
     ) async throws -> AgentModelSetting {
         struct Body: Codable {
             let action: String
             let provider: String
             let model: String
+            let base_url: String?
         }
         struct Resp: Codable { let setting: AgentModelSetting }
 
         let body = Body(
             action: "update",
             provider: provider,
-            model: model
+            model: model,
+            base_url: base_url
         )
         let resp: Resp = try await Supa.client.functions
             .invoke("agent-settings", options: .init(body: body))

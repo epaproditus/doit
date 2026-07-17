@@ -32,6 +32,11 @@ final class AppSetupModeStore {
         mode == .byoConnector
     }
 
+    /// True for any self-managed mode (BYO connector or full self-host).
+    var isSelfManaged: Bool {
+        mode == .byoConnector || mode == .selfHost
+    }
+
     func choose(_ mode: AppSetupMode) {
         self.mode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.storageKey)
