@@ -13,8 +13,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-// No SUPABASE_SERVICE_ROLE_KEY needed — all DB operations use the
-// authenticated user's JWT with RLS policies (see migration #44).
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 type ProviderId = string;
 
@@ -205,10 +204,10 @@ function sanitizeSetting(row: AgentModelSetting | null): AgentModelSetting | nul
 }
 
 async function hasPremiumModelAccess(
-    client: ReturnType<typeof createClient>,
+    serviceClient: ReturnType<typeof createClient>,
     userId: string,
 ): Promise<boolean> {
-    const { data, error } = await client
+    const { data, error } = await serviceClient
         .from("premium_model_users")
         .select("user_id")
         .eq("user_id", userId)
@@ -223,6 +222,9 @@ serve(async (req) => {
     }
     if (req.method !== "POST") {
         return json({ error: "method_not_allowed" }, 405);
+    }
+    if (!SUPABASE_SERVICE_ROLE_KEY) {
+        return json({ error: "service_role_not_configured" }, 500);
     }
 
     const authHeader = req.headers.get("Authorization") ?? "";
@@ -239,8 +241,7 @@ serve(async (req) => {
     }
     const userId = userResp.user.id;
 
-    // All DB operations go through userClient — RLS policies (migration #44)
-    // handle row-level access control so no service_role_key is needed.
+    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     let body: {
         action?: string;
@@ -257,8 +258,8 @@ serve(async (req) => {
     try {
         switch (body.action) {
             case "get": {
-                const premiumModelAccess = await hasPremiumModelAccess(userClient, userId);
-                const { data, error } = await userClient
+                const premiumModelAccess = await hasPremiumModelAccess(serviceClient, userId);
+                const { data, error } = await serviceClient
                     .from("agent_model_settings")
                     .select("user_id,provider,model,base_url,apply_status,apply_error,last_applied_at,updated_at")
                     .eq("user_id", userId)
@@ -271,7 +272,7 @@ serve(async (req) => {
                 });
             }
             case "update": {
-                const premiumModelAccess = await hasPremiumModelAccess(userClient, userId);
+                const premiumModelAccess = await hasPremiumModelAccess(serviceClient, userId);
                 const baseUrl = body.base_url ?? null;
 
                 // Self-managed (BYO / self-host): skip catalog validation.
@@ -289,7 +290,7 @@ serve(async (req) => {
                     }
                 }
 
-                const { data, error } = await userClient
+                const { data, error } = await serviceClient
                     .from("agent_model_settings")
                     .upsert({
                         user_id: userId,

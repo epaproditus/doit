@@ -39,6 +39,10 @@ hermes/profiles/*/.env
 hermes/profiles/*/hermes_state/
 hermes/profiles/*/mcp-tokens/
 
+# Generated / runtime artifacts
+*.log
+connector.env
+
 # Supabase CLI
 supabase/.temp/
 supabase/.branches/

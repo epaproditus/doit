@@ -9,9 +9,12 @@ import argparse
 import asyncio
 import logging
 import os
+import shlex
+import subprocess
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -19,6 +22,7 @@ import httpx
 from .connector_api import ConnectorAPI
 from .events import translate
 from .hermes import HermesClient, HermesEndpoint
+from .model_settings import _replace_top_level_block, _atomic_write
 from .prompt import build_prompt, session_id_for_todo, session_key_for_user
 from .runner import setup_logging
 from .scheduler import TaskPool, UserGates
@@ -99,6 +103,100 @@ async def _check_hermes_health(endpoint: HermesEndpoint) -> tuple[bool, str]:
         return False, _friendly_hermes_error(endpoint, exc)
 
 
+def _profiles_dir() -> Path:
+    """Return the Hermes profiles directory."""
+    return Path(os.environ.get("HERMES_PROFILES_DIR", os.path.expanduser("~/.hermes/profiles")))
+
+
+async def _apply_model_setting(
+    api: ConnectorAPI,
+    profile_name: str,
+    setting: dict,
+) -> None:
+    """Apply a pending model setting and report back via the API.
+
+    Edits the profile's config.yaml directly, then restarts the Hermes
+    gateway service for that profile.
+    """
+    provider = str(setting["provider"])
+    model = str(setting["model"])
+    base_url = str(setting.get("base_url") or "").strip() or None
+
+    # Build the model block for config.yaml
+    lines = [
+        "model:",
+        f"  provider: {provider}",
+        f"  default: {model}",
+    ]
+    if base_url:
+        lines.append(f"  base_url: {base_url}")
+    model_block = "\n".join(lines)
+
+    try:
+        profile_dir = _profiles_dir() / profile_name
+        config_path = profile_dir / "config.yaml"
+
+        if not config_path.exists():
+            raise RuntimeError(f"Profile config not found: {config_path}")
+
+        # Read, replace the model block, write atomically
+        existing = config_path.read_text()
+        updated = _replace_top_level_block(existing, "model", model_block)
+        _atomic_write(config_path, updated)
+
+        log.info(
+            "applied model setting profile=%s provider=%s model=%s%s",
+            profile_name, provider, model,
+            f" base_url={base_url}" if base_url else "",
+        )
+
+        # Restart Hermes before reporting — if restart fails the
+        # exception handler reports "failed" so the server knows a
+        # retry is needed, rather than seeing "applied" on a dead gateway.
+        _restart_hermes(profile_name)
+
+        # Report applied status
+        await api.report_model_apply(
+            apply_status="applied",
+            provider=provider,
+            model=model,
+        )
+
+    except Exception as exc:
+        log.error("failed to apply model setting: %s", exc)
+        try:
+            await api.report_model_apply(
+                apply_status="failed",
+                provider=provider,
+                model=model,
+                apply_error=str(exc),
+            )
+        except Exception as report_exc:
+            log.error("failed to report model apply failure: %s", report_exc)
+
+
+def _restart_hermes(profile_name: str) -> None:
+    """Restart the Hermes gateway for the given profile."""
+    # Try profile-specific gateway first, then the default gateway
+    services = [
+        f"hermes-gateway-{profile_name}.service",
+        "hermes-gateway.service",
+    ]
+    for svc in services:
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "restart", svc],
+                check=True, timeout=30, capture_output=True, text=True,
+            )
+            log.info("restarted %s", svc)
+            return
+        except subprocess.CalledProcessError as exc:
+            log.debug("could not restart %s: %s", svc, exc.stderr.strip())
+        except FileNotFoundError:
+            log.debug("sudo/systemctl not available")
+    log.warning("could not restart Hermes for profile %s", profile_name)
+
+
 async def _heartbeat_loop(
     api: ConnectorAPI,
     *,
@@ -108,11 +206,19 @@ async def _heartbeat_loop(
 ) -> None:
     while True:
         _, hermes_status = await _check_hermes_health(endpoint)
-        await api.heartbeat(
+        resp = await api.heartbeat(
             profile_name=profile_name,
             endpoint_url=endpoint_url,
             capabilities=_capabilities(hermes_status=hermes_status),
         )
+        # Apply any pending model setting (at most one per heartbeat tick)
+        pending = resp.get("pending_model_setting")
+        if pending and isinstance(pending, dict) and pending.get("provider") and pending.get("model"):
+            log.info(
+                "pending model setting detected provider=%s model=%s",
+                pending["provider"], pending["model"],
+            )
+            await _apply_model_setting(api, profile_name, pending)
         await asyncio.sleep(_HEARTBEAT_INTERVAL_SECS)
 
 

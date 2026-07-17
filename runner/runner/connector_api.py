@@ -99,3 +99,19 @@ class ConnectorAPI:
                 },
             )
         ).get("step")
+
+    async def report_model_apply(
+        self,
+        *,
+        apply_status: str,
+        provider: str,
+        model: str,
+        apply_error: str | None = None,
+    ) -> None:
+        await self.call(
+            "report_model_apply",
+            apply_status=apply_status,
+            provider=provider,
+            model=model,
+            apply_error=apply_error,
+        )
