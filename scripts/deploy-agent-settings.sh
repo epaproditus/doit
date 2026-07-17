@@ -23,19 +23,43 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SUPABASE_PROJECT_REF="nportxmsauhezjdubsma"
+# Allow override via env var; default to production connector project
+SUPABASE_PROJECT_REF="${SUPABASE_PROJECT_REF:-nportxmsauhezjdubsma}"
 SUPABASE_URL="https://${SUPABASE_PROJECT_REF}.supabase.co"
 
+# Per-project anon keys (public, safe to embed)
+case "$SUPABASE_PROJECT_REF" in
+    nportxmsauhezjdubsma)
+        DEFAULT_ANON_KEY="sb_publishable_Y_ug6gCljcKuPnst_s1TMw_oZ5BosqD"
+        ;;
+    qjeutitqgdsasccxfxdy)
+        DEFAULT_ANON_KEY="sb_publishable__PwyGaVjSxKhMKb2HgE3EQ_Id9qCEGJ"
+        ;;
+    *)
+        DEFAULT_ANON_KEY=""
+        ;;
+esac
+
 echo "=== PLY-309: Deploy agent-settings Edge Function ==="
+echo "   Project: $SUPABASE_PROJECT_REF"
 echo ""
 
 # --- Step 1: Link the project ---
 echo ">> Step 1/5: Linking Supabase project..."
 cd "$PROJECT_DIR"
-supabase link --project-ref "$SUPABASE_PROJECT_REF"
+if ! supabase link --project-ref "$SUPABASE_PROJECT_REF" 2>&1; then
+    if [ -n "${SUPABASE_DB_PASSWORD:-}" ]; then
+        echo "   PAT auth failed, trying database password..."
+        supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+    else
+        echo "   ERROR: Cannot link project. Make sure you're logged in via 'supabase login'"
+        echo "   or set SUPABASE_DB_PASSWORD (from Supabase Dashboard > Settings > Database)"
+        exit 1
+    fi
+fi
 echo "   Done."
 echo ""
 
@@ -50,11 +74,11 @@ if [ -z "$SERVICE_ROLE_KEY" ]; then
     exit 1
 fi
 
-# Read the anon key from the linked project config
-ANON_KEY=$(supabase secrets list --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null \
-    | grep -i "supabase_anon_key" | awk '{print $NF}') || true
+# Use the known anon key or derive from linked project
+ANON_KEY="$DEFAULT_ANON_KEY"
 if [ -z "$ANON_KEY" ]; then
-    ANON_KEY="sb_publishable__PwyGaVjSxKhMKb2HgE3EQ_Id9qCEGJ"
+    ANON_KEY=$(supabase secrets list --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null \
+        | grep -i "supabase_anon_key" | awk '{print $NF}') || true
 fi
 
 supabase secrets set \

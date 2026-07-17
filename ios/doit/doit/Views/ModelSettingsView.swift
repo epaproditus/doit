@@ -13,17 +13,15 @@ struct ModelSettingsView: View {
     @State private var error: String?
 
     // Self-managed (BYO/self-host) text fields
-    @State private var byoProvider = ""
-    @State private var byoModel = ""
-    @State private var byoBaseURL = ""
+    @AppStorage("settings.byo.provider") private var byoProvider = ""
+    @AppStorage("settings.byo.model") private var byoModel = ""
+    @AppStorage("settings.byo.baseURL") private var byoBaseURL = ""
 
     var body: some View {
         List {
             if setupMode.isSelfManaged {
                 byoFieldsSection
-            }
-
-            if loading && catalog.isEmpty {
+            } else if loading && catalog.isEmpty {
                 Section { ProgressView() }
             }
 
@@ -100,7 +98,7 @@ struct ModelSettingsView: View {
                 }
             }
 
-            if let setting {
+            if !setupMode.isSelfManaged, let setting {
                 Section {
                     HStack {
                         Text("Status")
@@ -189,31 +187,28 @@ struct ModelSettingsView: View {
     private func load() async {
         loading = true
         defer { loading = false }
+        
+        // In self-managed mode, load from local storage (no API call needed)
+        guard !setupMode.isSelfManaged else {
+            // Values are already loaded from @AppStorage
+            error = nil
+            connectivity.reportSuccess()
+            return
+        }
+        
         do {
             let response = try await AgentSettingsAPI.getModelSettings()
             catalog = response.catalog
             setting = response.setting
 
-            if setupMode.isSelfManaged {
-                if let s = response.setting {
-                    byoProvider = s.provider
-                    byoModel = s.model
-                    byoBaseURL = s.base_url ?? ""
-                } else {
-                    byoProvider = ""
-                    byoModel = ""
-                    byoBaseURL = ""
-                }
-            } else {
-                if let setting = response.setting,
-                   let provider = response.catalog.first(where: { $0.id == setting.provider }),
-                   provider.models.contains(where: { $0.id == setting.model && !$0.isLocked }) {
-                    selectedProviderID = setting.provider
-                    selectedModelID = setting.model
-                } else if let provider = response.catalog.first {
-                    selectedProviderID = provider.id
-                    selectedModelID = selectableModels(for: provider).first?.id ?? ""
-                }
+            if let setting = response.setting,
+               let provider = response.catalog.first(where: { $0.id == setting.provider }),
+               provider.models.contains(where: { $0.id == setting.model && !$0.isLocked }) {
+                selectedProviderID = setting.provider
+                selectedModelID = setting.model
+            } else if let provider = response.catalog.first {
+                selectedProviderID = provider.id
+                selectedModelID = selectableModels(for: provider).first?.id ?? ""
             }
             error = nil
             connectivity.reportSuccess()
@@ -229,23 +224,21 @@ struct ModelSettingsView: View {
     private func save() async {
         saving = true
         defer { saving = false }
+        
+        // In self-managed mode, values are saved to @AppStorage automatically
+        guard !setupMode.isSelfManaged else {
+            error = nil
+            connectivity.reportSuccess()
+            return
+        }
+        
         do {
-            if setupMode.isSelfManaged {
-                setting = try await AgentSettingsAPI.updateModelSettings(
-                    provider: byoProvider.trimmingCharacters(in: .whitespaces),
-                    model: byoModel.trimmingCharacters(in: .whitespaces),
-                    base_url: byoBaseURL.trimmingCharacters(in: .whitespaces).isEmpty
-                        ? nil
-                        : byoBaseURL.trimmingCharacters(in: .whitespaces)
-                )
-            } else {
-                guard let model = selectedModel, !model.isLocked else { return }
-                setting = try await AgentSettingsAPI.updateModelSettings(
-                    provider: selectedProviderID,
-                    model: selectedModelID,
-                    base_url: nil
-                )
-            }
+            guard let model = selectedModel, !model.isLocked else { return }
+            setting = try await AgentSettingsAPI.updateModelSettings(
+                provider: selectedProviderID,
+                model: selectedModelID,
+                base_url: nil
+            )
             error = nil
             connectivity.reportSuccess()
         } catch {
