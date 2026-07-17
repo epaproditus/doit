@@ -1,7 +1,7 @@
 # Doit project makefile
 # Common development and deployment tasks.
 
-.PHONY: help test deploy-prod deploy-dev verify-prod verify-dev status
+.PHONY: help test deploy-prod deploy-prod-legacy deploy-dev verify-prod verify-dev status
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -47,9 +47,12 @@ verify-dev: ## Check if dev agent-settings function is deployed
 		echo "  Unexpected status: HTTP $$STATUS"; \
 	fi
 
-deploy-prod: ## Deploy agent-settings to production (needs SUPABASE_PAT)
+deploy-prod: ## Deploy agent-settings to production (requires SUPABASE_PAT)
+	@./scripts/deploy-agent-settings.sh
+
+deploy-prod-legacy: ## Deploy agent-settings via old curl script (requires SUPABASE_PAT)
 	@echo ""
-	@echo "=== Deploy agent-settings -> PRODUCTION ==="
+	@echo "=== Deploy agent-settings -> PRODUCTION (legacy) ==="
 	@echo "Project: nportxmsauhezjdubsma"
 	@echo ""
 	@if [ -z "$${SUPABASE_PAT}" ]; then \
