@@ -65,12 +65,20 @@ jobs:
             for fn_dir in supabase/functions/*/; do
               fn=$(basename "$fn_dir")
               echo "==> Deploying $fn to dev"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+              if supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"; then
+                echo "  ✅ $fn deployed"
+              else
+                echo "  ❌ $fn failed to deploy"
+              fi
             done
           else
             for fn in $FUNCTIONS; do
               echo "==> Deploying $fn to dev"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+              if supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"; then
+                echo "  ✅ $fn deployed"
+              else
+                echo "  ❌ $fn failed to deploy"
+              fi
             done
           fi
 
@@ -133,18 +141,35 @@ jobs:
             fi
           fi
 
+          FAILED_FUNCTIONS=""
           FUNCTIONS="${{ github.event.inputs.functions }}"
           if [ -z "$FUNCTIONS" ]; then
             for fn_dir in supabase/functions/*/; do
               fn=$(basename "$fn_dir")
               echo "==> Deploying $fn to production"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api || true
+              if supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api; then
+                echo "  ✅ $fn deployed"
+              else
+                echo "  ❌ $fn failed to deploy"
+                FAILED_FUNCTIONS="$FAILED_FUNCTIONS $fn"
+              fi
             done
           else
             for fn in $FUNCTIONS; do
               echo "==> Deploying $fn to production"
-              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api || true
+              if supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --use-api; then
+                echo "  ✅ $fn deployed"
+              else
+                echo "  ❌ $fn failed to deploy"
+                FAILED_FUNCTIONS="$FAILED_FUNCTIONS $fn"
+              fi
             done
+          fi
+          if [ -n "$FAILED_FUNCTIONS" ]; then
+            echo ""
+            echo "  ⚠️  Some functions failed to deploy:$FAILED_FUNCTIONS"
+            echo "  If all fail with 401, the SUPABASE_ACCESS_TOKEN lacks Management API access."
+            echo "  Override with: gh workflow run \"Deploy Edge Functions\" -f supabase_pat=sbp_xxx"
           fi
 
       - name: Verify agent-settings on production
