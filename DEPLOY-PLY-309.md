@@ -60,6 +60,17 @@ DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
 ./scripts/deploy-agent-settings.sh
 ```
 
+### Direct Management API (no CLI needed)
+
+```bash
+export SUPABASE_PAT="sbp_xxx..."              # from dashboard/account/tokens
+export DOIT_SUPABASE_SERVICE_ROLE_KEY="eyJ..." # from dashboard/settings/api
+./scripts/deploy-agent-settings-direct.sh
+```
+
+The script uses curl + the Supabase Management API directly. No CLI installation needed.
+Deploys to the production project by default. Override with `SUPABASE_PROJECT_REF`.
+
 ### Via GitHub Actions
 
 Set these repo secrets then trigger the workflow:
