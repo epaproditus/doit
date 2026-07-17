@@ -8,6 +8,8 @@
 #   - Supabase CLI installed (npm install -g supabase)
 #   - SUPABASE_ACCESS_TOKEN set (PAT with project access)
 #   - OR: logged in via `supabase login`
+#   - OR: SUPABASE_DB_PASSWORD set (for migration-only access without Management API)
+#     (database password found in Supabase Dashboard > Project Settings > Database)
 #
 # Usage:
 #   # Deploy all functions (auto-detect project ref from env files)
@@ -91,7 +93,20 @@ cd "$PROJECT_DIR"
 # ---- Link project (if not already linked) ----
 if [ ! -f supabase/.temp/linked-project-ref ] || [ "$(cat supabase/.temp/linked-project-ref 2>/dev/null)" != "$PROJECT_REF" ]; then
   info "Linking Supabase project..."
-  supabase link --project-ref "$PROJECT_REF" 2>&1 || warn "Link failed (token may not have access or already linked)"
+  if supabase link --project-ref "$PROJECT_REF" 2>&1; then
+    info "Project linked via PAT."
+  elif [ -n "${SUPABASE_DB_PASSWORD:-}" ]; then
+    info "PAT link failed, trying database password fallback..."
+    info "  (only needed if you lack Management API access)"
+    supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD" 2>&1 || warn "Password link also failed."
+  else
+    warn "Link failed. This is required for db push."
+    warn "Options:"
+    warn "  1. Set SUPABASE_ACCESS_TOKEN with a valid PAT"
+    warn "  2. Set SUPABASE_DB_PASSWORD with the project database password"
+    warn "     (found in Supabase Dashboard > Project Settings > Database)"
+    warn "  3. Run supabase login interactively"
+  fi
 else
   info "Project already linked."
 fi
