@@ -9,6 +9,8 @@
 #   - Logged in: supabase login
 #   - Access to the Supabase project nportxmsauhezjdubsma
 #   - DOIT_SUPABASE_SERVICE_ROLE_KEY set (from Supabase Dashboard > Settings > API)
+#     NOTE: No longer required — the function now uses user-level auth with RLS
+#     (migration #44). Only needed if you want to set it as a secret (harmless).
 #
 # Usage:
 #   export DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ...your_service_role_key
@@ -68,24 +70,32 @@ echo ">> Step 2/5: Setting Edge Function secrets..."
 SERVICE_ROLE_KEY="${DOIT_SUPABASE_SERVICE_ROLE_KEY:-}"
 
 if [ -z "$SERVICE_ROLE_KEY" ]; then
-    echo "   ERROR: DOIT_SUPABASE_SERVICE_ROLE_KEY is not set."
-    echo "   Get it from: Supabase Dashboard > Settings > API > service_role key"
-    echo "   Then re-run: export DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... && $0"
-    exit 1
-fi
+    echo "   DOIT_SUPABASE_SERVICE_ROLE_KEY not set. Not needed — the function uses"
+    echo "   user-level auth with RLS (migration #44). Skipping secrets step."
+    echo "   (SUPABASE_URL and SUPABASE_ANON_KEY are auto-injected by Supabase.)"
+    ANON_KEY="$DEFAULT_ANON_KEY"
+    if [ -z "$ANON_KEY" ]; then
+        ANON_KEY=$(supabase secrets list --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null \
+            | grep -i "supabase_anon_key" | awk '{print $NF}') || true
+    fi
+    supabase secrets set \
+        SUPABASE_URL="$SUPABASE_URL" \
+        SUPABASE_ANON_KEY="$ANON_KEY" \
+        --project-ref "$SUPABASE_PROJECT_REF"
+else
+    # Use the known anon key or derive from linked project
+    ANON_KEY="$DEFAULT_ANON_KEY"
+    if [ -z "$ANON_KEY" ]; then
+        ANON_KEY=$(supabase secrets list --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null \
+            | grep -i "supabase_anon_key" | awk '{print $NF}') || true
+    fi
 
-# Use the known anon key or derive from linked project
-ANON_KEY="$DEFAULT_ANON_KEY"
-if [ -z "$ANON_KEY" ]; then
-    ANON_KEY=$(supabase secrets list --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null \
-        | grep -i "supabase_anon_key" | awk '{print $NF}') || true
+    supabase secrets set \
+        SUPABASE_URL="$SUPABASE_URL" \
+        SUPABASE_ANON_KEY="$ANON_KEY" \
+        SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+        --project-ref "$SUPABASE_PROJECT_REF"
 fi
-
-supabase secrets set \
-    SUPABASE_URL="$SUPABASE_URL" \
-    SUPABASE_ANON_KEY="$ANON_KEY" \
-    SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
-    --project-ref "$SUPABASE_PROJECT_REF"
 echo "   Done."
 echo ""
 
