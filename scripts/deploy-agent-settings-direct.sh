@@ -186,17 +186,12 @@ else
     }"
 fi
 
-SECRETS_RESP=$(curl -s -w "\\n%{http_code}" -X POST \\
-    "$API_BASE/projects/$PROJECT_REF/secrets" \\
+# Use the payload variable we just built
+SECRETS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+    "$API_BASE/projects/$PROJECT_REF/secrets" \
     -H "Authorization: Bearer $SUPABASE_PAT" \
     -H "Content-Type: application/json" \
-    -d "{
-        \"secrets\": [
-            {\"name\":\"SUPABASE_URL\",\"value\":\"$SUPABASE_URL\"},
-            {\"name\":\"SUPABASE_ANON_KEY\",\"value\":\"$ANON_KEY\"},
-            {\"name\":\"SUPABASE_SERVICE_ROLE_KEY\",\"value\":\"$SERVICE_ROLE_KEY\"}
-        ]
-    }" 2>/dev/null)
+    -d "$SECRETS_PAYLOAD" 2>/dev/null)
 
 SECRETS_CODE=$(echo "$SECRETS_RESP" | tail -1)
 if [ "$SECRETS_CODE" = "200" ] || [ "$SECRETS_CODE" = "201" ]; then
