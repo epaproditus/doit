@@ -173,9 +173,10 @@ jobs:
             echo "     d. Set secrets: SUPABASE_URL and SUPABASE_ANON_KEY"
             echo "     e. SQL Editor > Run migration #43 and #44"
             echo ""
-            echo "  3. From a machine with a valid PAT, run:"
-            echo "     export SUPABASE_PAT=sbp_xxx"
-            echo "     SUPABASE_PROJECT_REF=nportxmsauhezjdubsma ./scripts/deploy-agent-settings-direct.sh"
+            echo "  3. From a machine with a valid PAT and curl, run:"
+            echo "     SUPABASE_PAT=sbp_xxx make deploy-prod"
+            echo ""
+            echo "  For full details see: docs/deploy-agent-settings.md"
             echo ""
             exit 1
           else

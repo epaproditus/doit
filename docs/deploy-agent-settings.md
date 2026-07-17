@@ -19,28 +19,29 @@ function is not deployed, the app shows:
 
 ## Quickest Path (1 minute)
 
-### If you have a valid Supabase PAT:
+### One-liner (Mac/Linux with curl):
 
 ```bash
-export SUPABASE_PAT=sbp_your_valid_token
-./scripts/deploy-prod-curl.sh
+# Get a PAT from: https://supabase.com/dashboard/account/tokens
+# Make sure the PAT has Management API access to the org that owns
+# the `nportxmsauhezjdubsma` project (check the project's URL in Dashboard).
+
+SUPABASE_PAT=sbp_your_valid_token ./scripts/deploy-prod-curl.sh
 ```
 
-The script uses only `curl` (no Supabase CLI needed). Get a PAT from:
-https://supabase.com/dashboard/account/tokens
+Or with the Makefile shortcut:
 
-Make sure the PAT has Management API access to the organization that owns
-the `nportxmsauhezjdubsma` project.
+```bash
+SUPABASE_PAT=sbp_xxx make deploy-prod
+```
 
-### If you don't have curl:
-
-Use the Supabase CLI:
+### If you have the Supabase CLI:
 
 ```bash
 npm install -g supabase
 supabase login
 cd /path/to/doit
-./scripts/deploy-prod.sh
+SUPABASE_PAT=sbp_xxx make deploy-prod
 ```
 
 ## Manual Dashboard Deploy (no CLI, no PAT)
