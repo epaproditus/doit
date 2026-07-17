@@ -2,81 +2,80 @@
 
 ## Problem
 
-The `agent-settings` Supabase Edge Function has not been deployed with the latest code (PLY-308 self-managed model support) on either Supabase project:
+The `agent-settings` Supabase Edge Function is not deployed on the **production** Supabase project (`nportxmsauhezjdubsma`), causing the iOS app to show a 404 error when it tries to load model settings.
 
-- **Dev** (`qjeutitqgdsasccxfxdy`): Function is deployed but with **stale code** (missing `base_url` support for self-managed providers)
-- **Production** (`nportxmsauhezjdubsma`): Function is **not deployed at all** (returns HTTP 404)
+The dev project (`qjeutitqgdsasccxfxdy`) has the function deployed and working with the latest code.
 
-The iOS app calls this function when the user opens Model Settings. Without the updated function, users see:
-> Couldn't load model settings: Edge Function returned a non-2xx status code: 404
-
-The root cause is that the Supabase PAT on this server does not have Management API access to either project's organization.
-
-## Current State
+## Current State (as of July 17, 2026)
 
 | Item | Dev (`qjeuti...`) | Prod (`nportxm...`) |
-| ---- | ----------------- | ------------------- |
-| Function deployed | Yes (stale code) | No (404) |
-| Migration #43 (base_url column) | Not applied | Not applied |
-| Self-managed save works | No | No |
+|------|--------------------|---------------------|
+| Function deployed | Yes (working, returns 401 without auth) | No (returns HTTP 404) |
+| Migration #43 (base_url, provider text) | Not checked | agent_model_settings table exists |
+| Migration #44 (RLS policies) | Not applied | Not applied |
+| Self-managed save works | Yes (function supports base_url) | No (function doesn't exist) |
 
-## Prerequisites (from Mac)
+## Root Cause
 
-```bash
-npm install -g supabase
-supabase login                  # opens browser for PAT
-git checkout main && git pull   # latest code
-```
+The Supabase PAT on this machine (`sbp_e72fca...`) is either expired or does not have Management API access to the production project's organization. All Management API calls return 401 Unauthorized.
 
-Get the service role keys from **Supabase Dashboard > Project Settings > API**:
+The CI/CD workflow in `.github/workflows/deploy-edge-functions.yml` also needs a valid `SUPABASE_ACCESS_TOKEN` secret in GitHub.
 
-| Project | Dashboard URL |
-|---------|--------------|
-| Dev | https://supabase.com/dashboard/project/qjeutitqgdsasccxfxdy/settings/api |
-| Production | https://supabase.com/dashboard/project/nportxmsauhezjdubsma/settings/api |
+## How to Deploy to Production
 
-## How to Deploy
+### Option A: Via Supabase Dashboard (Manual, no PAT needed)
 
-### Option A: Deploy Script (recommended)
+1. Open the production project:
+   https://supabase.com/dashboard/project/nportxmsauhezjdubsma
+
+2. **SQL Editor** — Run migration #43:
+   Open SQL Editor, paste and run the content of:
+   supabase/migrations/20240601000043_self_hosted_provider_base_url.sql
+
+3. **SQL Editor** — Run migration #44 (RLS policies):
+   Open SQL Editor, paste and run the content of:
+   supabase/migrations/20240601000044_rls_for_user_setting_upsert.sql
+
+4. **Edge Functions** — Create "agent-settings":
+   - Click "Create a new function"
+   - Name: agent-settings
+   - Paste the code from supabase/functions/agent-settings/index.ts
+   - Click "Save and Deploy"
+   - Under "Configuration", leave JWT verification enabled
+
+5. **Settings > API** — Set 3 secrets for the Edge Function:
+   - Go to Project Settings > API
+   - Under "Project secrets", add:
+     SUPABASE_URL=https://nportxmsauhezjdubsma.supabase.co
+     SUPABASE_ANON_KEY=sb_publishable_Y_ug6gCljcKuPnst_s1TMw_oZ5BosqD
+     SUPABASE_SERVICE_ROLE_KEY=<get from Service Role Key field>
+
+### Option B: Via Supabase CLI (needs valid PAT)
 
 ```bash
 cd ~/path/to/doit
 
-# Set service role keys (from dashboard)
-export DOIT_DEV_SERVICE_ROLE_KEY=eyJ...    # dev project key
-export DOIT_PROD_SERVICE_ROLE_KEY=eyJ...   # production project key
-
-# Deploy to BOTH projects + apply migrations
-./scripts/deploy-all-projects.sh
-```
-
-### Option B: Deploy individually
-
-```bash
-# Deploy to DEV (re-deploy with latest code + migration)
-SUPABASE_PROJECT_REF=qjeutitqgdsasccxfxdy \
-DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
-./scripts/deploy-agent-settings.sh
-
-# Deploy to PRODUCTION (fix the 404 + migration)
 SUPABASE_PROJECT_REF=nportxmsauhezjdubsma \
-DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
-./scripts/deploy-agent-settings.sh
+SUPABASE_DB_PASSWORD=<database_password> \
+DOIT_SUPABASE_SERVICE_ROLE_KEY=<service_role_key> \
+./scripts/pl-309-deploy.sh
 ```
 
-### Option C: Manual (Supabase Dashboard)
+The database password is at: Supabase Dashboard > Project Settings > Database.
 
-1. Open the project dashboard (URLs above)
-2. **SQL Editor** → Run the migration at `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql`
-3. **Edge Functions** → Create/update "agent-settings" with code from `supabase/functions/agent-settings/index.ts`
-4. **Settings > API** → Set 3 secrets: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+### Option C: Via CI/CD (needs PAT set in GitHub secrets)
+
+1. GitHub repo > Settings > Secrets and variables > Actions
+2. Add secret SUPABASE_ACCESS_TOKEN with a valid PAT
+3. Actions > "Deploy Edge Functions" > Run workflow
+4. Check "apply_migrations" if migration #43 and #44 are not yet applied
 
 ## Verification
 
-After deploy, both projects should return HTTP 401 (not 404):
+After deployment, verify the function is live:
 
 ```bash
-# Should return 401 (function exists, auth required)
+# Should return 401 (function exists, auth required) — NOT 404
 curl -s -o /dev/null -w "%{http_code}" -X POST \
   https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
   -H 'Content-Type: application/json' \
@@ -84,23 +83,24 @@ curl -s -o /dev/null -w "%{http_code}" -X POST \
 # Expected: 401
 ```
 
-With a valid JWT:
+With a valid JWT, the function should return the full catalog:
 ```bash
+TOKEN=$(curl -s -X POST \
+  "https://nportxmsauhezjdubsma.supabase.co/auth/v1/signup" \
+  -H "Content-Type: application/json" \
+  -H "apikey: sb_publishable_Y_ug6gCljcKuPnst_s1TMw_oZ5BosqD" \
+  -d '{}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
+
 curl -s -X POST \
-  https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
+  "https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings" \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <valid_jwt>' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"action":"get"}'
 # Expected: {"catalog": [...], "setting": ..., "default_selection": {...}}
 ```
 
-Self-managed save test:
-```bash
-curl -s -X POST \
-  https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <valid_jwt>' \
-  -d '{"action":"update","provider":"opencode-go","model":"deepseek-v4-flash","base_url":"https://api.example.com"}'
-# Expected: {"setting": {"provider": "opencode-go", ...}}
-# NOT: {"error":"unsupported_provider"}
-```
+## iOS App Changes
+
+Both SettingsView and ModelSettingsView have been updated to:
+1. Skip the API call for self-managed mode — no 404 if the user is using BYO/self-host mode
+2. Show a friendlier error message for 404s instead of the raw error
