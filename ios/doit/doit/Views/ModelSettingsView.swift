@@ -12,10 +12,20 @@ struct ModelSettingsView: View {
     @State private var saving = false
     @State private var error: String?
 
+    // Remote Hermes config for self-managed mode
+    @State private var remoteConfig: BYOHermesConfig?
+    @State private var remoteConfigLoading = false
+    @State private var remoteConfigError: String?
+
     // Self-managed (BYO/self-host) text fields
     @AppStorage("settings.byo.provider") private var byoProvider = ""
     @AppStorage("settings.byo.model") private var byoModel = ""
     @AppStorage("settings.byo.baseURL") private var byoBaseURL = ""
+
+    // Whether we're displaying pickers (vs fallback text fields)
+    private var usingRemoteConfig: Bool {
+        remoteConfig != nil && !remoteConfigLoading
+    }
 
     var body: some View {
         List {
@@ -142,20 +152,50 @@ struct ModelSettingsView: View {
 
     private var byoFieldsSection: some View {
         Section {
-            TextField("Provider (e.g. opencode-go)", text: $byoProvider)
-                .autocapitalization(.none)
-                .disableAutocorrection(true)
-            TextField("Model (e.g. deepseek-v4-flash)", text: $byoModel)
-                .autocapitalization(.none)
-                .disableAutocorrection(true)
-            TextField("Base URL (optional)", text: $byoBaseURL)
+            TextField("Base URL", text: $byoBaseURL)
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
                 .keyboardType(.URL)
+                .onChange(of: byoBaseURL) { _, _ in
+                    // Reset remote config when URL changes so we re-fetch
+                    remoteConfig = nil
+                    remoteConfigError = nil
+                }
+
+            if remoteConfigLoading {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Fetching config from Hermes...")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let remoteConfig {
+                Picker("Provider", selection: $byoProvider) {
+                    Text(remoteConfig.provider).tag(remoteConfig.provider)
+                }
+                Picker("Model", selection: $byoModel) {
+                    Text(remoteConfig.model).tag(remoteConfig.model)
+                }
+            } else {
+                // Fallback: free-text fields when remote config unavailable
+                TextField("Provider (e.g. opencode-go)", text: $byoProvider)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                TextField("Model (e.g. deepseek-v4-flash)", text: $byoModel)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+            }
+
+            if let remoteConfigError {
+                Text(remoteConfigError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         } header: {
             Text("Self-Managed Model")
         } footer: {
-            Text("Enter your Hermes provider, model name, and optional base URL. Changes apply on the next Hermes agent run.")
+            Text("Enter your Hermes API server base URL, then the app fetches your current provider and model. Changes apply on the next Hermes agent run.")
         }
     }
 
@@ -188,11 +228,35 @@ struct ModelSettingsView: View {
         loading = true
         defer { loading = false }
         
-        // In self-managed mode, load from local storage (no API call needed)
+        // In self-managed mode, fetch remote config from the Hermes API server
         guard !setupMode.isSelfManaged else {
-            // Values are already loaded from @AppStorage
             error = nil
             connectivity.reportSuccess()
+            
+            // Fetch remote config if we have a base URL
+            guard !byoBaseURL.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return
+            }
+            
+            remoteConfigLoading = true
+            defer { remoteConfigLoading = false }
+            
+            do {
+                let config = try await BYOModelSettingsAPI.getConfig(baseURL: byoBaseURL)
+                remoteConfig = config
+                remoteConfigError = nil
+                // Pre-populate the provider/model fields from the remote config
+                byoProvider = config.provider
+                byoModel = config.model
+                connectivity.reportSuccess()
+            } catch {
+                remoteConfig = nil
+                remoteConfigError = "Couldn't fetch remote config: \(error.localizedDescription)"
+                // Fall through to free-text fields
+                if connectivity.reportFailure(error) {
+                    self.error = nil
+                }
+            }
             return
         }
         

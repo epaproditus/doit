@@ -38,6 +38,32 @@ struct AgentModelSetting: Codable, Hashable, Sendable {
     var updated_at: String
 }
 
+extension AgentModelCatalogResponse {
+    /// Create a single-provider catalog from a remote Hermes agent config.
+    /// Used in self-managed mode to drive the provider/model pickers.
+    init(from remoteConfig: BYOHermesConfig) {
+        let option = AgentModelProviderOption(
+            id: remoteConfig.provider,
+            name: remoteConfig.provider,
+            models: [
+                AgentModelOption(
+                    id: remoteConfig.model,
+                    name: remoteConfig.model,
+                    label: "Active",
+                    description: "Currently configured on the remote Hermes agent.",
+                    locked: false
+                )
+            ]
+        )
+        self.catalog = [option]
+        self.setting = nil
+        self.default_selection = AgentModelSelection(
+            provider: remoteConfig.provider,
+            model: remoteConfig.model
+        )
+    }
+}
+
 enum AgentModelApplyStatus: String, Codable, Sendable {
     case pending
     case applied
