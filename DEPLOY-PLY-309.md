@@ -13,111 +13,93 @@ exposes this code path. Without the function, users see:
 
 | Project | Ref | agent-settings | Migration #43 |
 |---------|-----|---------------|---------------|
-| iOS Dev | `qjeutitqgdsasccxfxdy` | Deployed (old code — missing base_url support) | Not applied |
+| iOS Dev | `qjeutitqgdsasccxfxdy` | Deployed (needs redeploy for latest code) | Not applied |
 | Production | `nportxmsauhezjdubsma` | **Not deployed — returns 404** | Not applied |
 
-## How to Deploy
+## Root Cause
 
-### Prerequisites (one-time)
+Two separate issues:
+
+1. **Production project**: The function was never deployed. Returning HTTP 404.
+2. **Both projects**: Migration `20240601000043` (provider column to text,
+   add base_url column) was never applied, so self-managed model saves fail.
+
+## GitHub Actions Auto-Deploy
+
+The workflow at `.github/workflows/deploy-edge-functions.yml` deploys to BOTH
+projects automatically whenever `supabase/functions/**` or `supabase/migrations/**`
+changes on main. It requires:
+
+1. `SUPABASE_ACCESS_TOKEN` secret — a Supabase PAT with Management API access
+   to BOTH projects' organizations. Get one at:
+   https://supabase.com/dashboard/account/tokens
+   (must be created in the same organization that owns the project)
+
+If the PAT only has access to one organization, the prod deployment step will
+gracefully fail and print instructions for manual deploy.
+
+## Manual Deploy (one-shot)
+
+### Option A: Deploy via Supabase CLI
 
 ```bash
 npm install -g supabase
-supabase login                  # opens browser for PAT
-git checkout main && git pull   # latest code
+supabase login                    # opens browser for PAT
+cd ~/path/to/doit && git pull origin main
+
+# Deploy to production project
+supabase link --project-ref nportxmsauhezjdubsma
+supabase functions deploy agent-settings --project-ref nportxmsauhezjdubsma
+
+# Apply the migration
+supabase db push --project-ref nportxmsauhezjdubsma
 ```
 
-Get the service role keys from **Supabase Dashboard > Project Settings > API**:
-
-| Project | Dashboard URL |
-|---------|--------------|
-| Dev | https://supabase.com/dashboard/project/qjeutitqgdsasccxfxdy |
-| Production | https://supabase.com/dashboard/project/nportxmsauhezjdubsma |
-
-### Deploy (from Mac)
+### Option B: Deploy via Management API (direct script)
 
 ```bash
-cd ~/path/to/doit
-
-# Set service role keys (get from dashboard)
-export DOIT_DEV_SERVICE_ROLE_KEY=eyJ...    # dev project key
-export DOIT_PROD_SERVICE_ROLE_KEY=eyJ...   # production project key
-
-# Deploy to BOTH projects + apply migrations
-./scripts/deploy-all-projects.sh
-```
-
-### Deploy individually (if script doesn't work)
-
-```bash
-# Deploy to DEV (re-deploy with latest code + migration)
-SUPABASE_PROJECT_REF=qjeutitqgdsasccxfxdy \
-DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
-./scripts/deploy-agent-settings.sh
-
-# Deploy to PRODUCTION (fix the 404 + migration)
-SUPABASE_PROJECT_REF=nportxmsauhezjdubsma \
-DOIT_SUPABASE_SERVICE_ROLE_KEY=eyJ... \
-./scripts/deploy-agent-settings.sh
-```
-
-### Direct Management API (no CLI needed)
-
-```bash
-export SUPABASE_PAT="sbp_xxx..."              # from dashboard/account/tokens
-export DOIT_SUPABASE_SERVICE_ROLE_KEY="eyJ..." # from dashboard/settings/api
+export SUPABASE_PAT="sbp_xxx..."  # PAT with Management API access
+export DOIT_SUPABASE_SERVICE_ROLE_KEY="eyJ..."  # from Dashboard > Settings > API
 ./scripts/deploy-agent-settings-direct.sh
 ```
 
-The script uses curl + the Supabase Management API directly. No CLI installation needed.
-Deploys to the production project by default. Override with `SUPABASE_PROJECT_REF`.
+This deploys to the production project by default. Set `SUPABASE_PROJECT_REF`
+to override:
+```bash
+SUPABASE_PROJECT_REF=qjeutitqgdsasccxfxdy ./scripts/deploy-agent-settings-direct.sh
+```
 
-### Via GitHub Actions
+### Option C: Deploy to both at once
 
-Set these repo secrets then trigger the workflow:
-- `SUPABASE_ACCESS_TOKEN` — PAT with Management API access to both projects
-- `SUPABASE_PROJECT_REF` — default project ref
+```bash
+export DOIT_DEV_SERVICE_ROLE_KEY="eyJ..."
+export DOIT_PROD_SERVICE_ROLE_KEY="eyJ..."
+./scripts/deploy-all-projects.sh
+```
 
-Go to: **Actions > Deploy Edge Functions > Run workflow** (check "apply_migrations")
+## Migration SQL
 
-### Manual (Supabase Dashboard)
+If you prefer to apply migrations manually, run this in Supabase Dashboard > SQL Editor:
 
-1. Open `https://supabase.com/dashboard/project/nportxmsauhezjdubsma`
-2. **SQL Editor** → Run the migration at `supabase/migrations/20240601000043_self_hosted_provider_base_url.sql`
-3. **Edge Functions** → Create "agent-settings" with code from `supabase/functions/agent-settings/index.ts`
-4. **Settings** → Set 3 secrets: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
-5. Repeat for project `qjeutitqgdsasccxfxdy`
+```sql
+alter table agent_model_settings
+    alter column provider type text using provider::text;
+
+alter table agent_model_settings
+    add column base_url text;
+
+drop type if exists agent_model_provider;
+```
 
 ## Verification
 
-After deploy, both projects should return HTTP 401 (not 404):
+After deployment, the function should return HTTP 401 (not 404) when called
+without auth:
 
 ```bash
-# Should return 401 (function exists, auth required)
-curl -s -o /dev/null -w '%{http_code}' -X POST \
-  https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
-  -H 'Content-Type: application/json' \
+curl -X POST "https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings" \
+  -H "Content-Type: application/json" \
   -d '{"action":"get"}'
-# Expected: 401
-```
-
-With a valid JWT (from the iOS app):
-```bash
-curl -s -X POST \
-  https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <valid_jwt>' \
-  -d '{"action":"get"}'
-# Expected: {"catalog": [...], "setting": ..., "default_selection": {...}}
-```
-
-### Self-managed save test
-```bash
-# Should succeed (no catalog validation when base_url provided)
-curl -s -X POST \
-  https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <valid_jwt>' \
-  -d '{"action":"update","provider":"opencode-go","model":"deepseek-v4-flash","base_url":"https://api.example.com"}'
-# Expected: {"setting": {"provider": "opencode-go", ...}}
-# NOT: {"error":"unsupported_provider"}
+# Expected: HTTP 401 (JWT verification active)
+# NOT: HTTP 404 (function not found)
 ```
