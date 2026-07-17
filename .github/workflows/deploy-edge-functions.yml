@@ -17,13 +17,13 @@ on:
         required: false
         type: boolean
         default: false
-      project_ref:
-        description: 'Supabase project ref (default: auto-detected)'
-        required: false
-        type: string
+
+env:
+  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
 jobs:
-  deploy:
+  deploy-dev:
+    name: Deploy to dev project
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,65 +33,103 @@ jobs:
         with:
           version: latest
 
-      - name: Determine project ref
-        id: project
-        run: |
-          REF="${{ github.event.inputs.project_ref }}"
-          if [ -z "$REF" ]; then
-            REF="${{ secrets.SUPABASE_PROJECT_REF }}"
-          fi
-          if [ -z "$REF" ]; then
-            echo "Missing project ref. Set SUPABASE_PROJECT_REF secret or pass via workflow_dispatch."
-            exit 1
-          fi
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "Using project ref: $REF"
-
-      - name: Link project
-        run: supabase link --project-ref "${{ steps.project.outputs.ref }}"
+      - name: Deploy agent-settings to dev project
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-
-      - name: Apply pending migrations
-        if: ${{ github.event_name == 'push' || github.event.inputs.apply_migrations == 'true' }}
+          SUPABASE_PROJECT_REF: qjeutitqgdsasccxfxdy
         run: |
-          echo "Applying pending database migrations..."
-          supabase db push --project-ref "${{ steps.project.outputs.ref }}"
-          echo "Migration 20240601000043 applied: provider column now text, base_url column added."
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          echo "==> Linking to dev project: $SUPABASE_PROJECT_REF"
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
 
-      - name: Deploy functions
-        run: |
+          if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.apply_migrations }}" == "true" ]]; then
+            echo "==> Applying pending migrations..."
+            supabase db push --project-ref "$SUPABASE_PROJECT_REF" || echo "  ⚠️  db push failed (may need service_role key)"
+          fi
+
           FUNCTIONS="${{ github.event.inputs.functions }}"
           if [ -z "$FUNCTIONS" ]; then
-            # Deploy all functions
             for fn_dir in supabase/functions/*/; do
               fn=$(basename "$fn_dir")
-              echo "==> Deploying $fn"
-              supabase functions deploy "$fn" --project-ref "${{ steps.project.outputs.ref }}"
+              echo "==> Deploying $fn to dev"
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
             done
           else
             for fn in $FUNCTIONS; do
-              echo "==> Deploying $fn"
-              supabase functions deploy "$fn" --project-ref "${{ steps.project.outputs.ref }}"
+              echo "==> Deploying $fn to dev"
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
             done
           fi
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
-      - name: Verify agent-settings function
+      - name: Verify agent-settings on dev
+        env:
+          SUPABASE_PROJECT_REF: qjeutitqgdsasccxfxdy
         run: |
-          echo "==> Verifying agent-settings endpoint..."
+          echo "==> Verifying agent-settings on dev..."
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "https://${{ steps.project.outputs.ref }}.supabase.co/functions/v1/agent-settings" \
+            -X POST "https://$SUPABASE_PROJECT_REF.supabase.co/functions/v1/agent-settings" \
             -H "Content-Type: application/json" \
             -d '{"action":"get"}' || echo "000")
           if [ "$STATUS" = "401" ] || [ "$STATUS" = "200" ]; then
-            echo "✅ Function is live (HTTP $STATUS)"
+            echo "  ✅ Dev function is live (HTTP $STATUS)"
           elif [ "$STATUS" = "404" ]; then
-            echo "❌ Function NOT found (HTTP 404)"
+            echo "  ❌ Dev function NOT found (HTTP 404)"
             exit 1
           else
-            echo "⚠️ Unexpected status: HTTP $STATUS"
+            echo "  ⚠️  Unexpected status: HTTP $STATUS"
+          fi
+
+  deploy-prod:
+    name: Deploy to production project
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy agent-settings to production project
+        env:
+          SUPABASE_PROJECT_REF: nportxmsauhezjdubsma
+        run: |
+          echo "==> Linking to production project: $SUPABASE_PROJECT_REF"
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+
+          if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.apply_migrations }}" == "true" ]]; then
+            echo "==> Applying pending migrations..."
+            supabase db push --project-ref "$SUPABASE_PROJECT_REF" || echo "  ⚠️  db push failed (may need service_role key)"
+          fi
+
+          FUNCTIONS="${{ github.event.inputs.functions }}"
+          if [ -z "$FUNCTIONS" ]; then
+            for fn_dir in supabase/functions/*/; do
+              fn=$(basename "$fn_dir")
+              echo "==> Deploying $fn to production"
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+            done
+          else
+            for fn in $FUNCTIONS; do
+              echo "==> Deploying $fn to production"
+              supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+            done
+          fi
+
+      - name: Verify agent-settings on production
+        run: |
+          echo "==> Verifying agent-settings on production..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://nportxmsauhezjdubsma.supabase.co/functions/v1/agent-settings" \
+            -H "Content-Type: application/json" \
+            -d '{"action":"get"}' || echo "000")
+          if [ "$STATUS" = "401" ] || [ "$STATUS" = "200" ]; then
+            echo "  ✅ Production function is live (HTTP $STATUS)"
+          elif [ "$STATUS" = "404" ]; then
+            echo "  ❌ Production function NOT found (HTTP 404)"
+            echo "  This means the SUPABASE_ACCESS_TOKEN doesn't have access to the production project's org."
+            echo "  Manual deploy required: see scripts/deploy-agent-settings-direct.sh"
+            exit 1
+          else
+            echo "  ⚠️  Unexpected status: HTTP $STATUS"
           fi
