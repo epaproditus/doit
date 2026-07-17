@@ -158,7 +158,7 @@ struct SettingsView: View {
     private var modelSettingsButton: some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            if setupMode.isBYO {
+            if setupMode.isSelfManaged {
                 openRoute(.modelSettings)
             } else {
                 presentModelPicker()
@@ -330,7 +330,7 @@ struct SettingsView: View {
     }
 
     private func presentModelPicker() {
-        guard !setupMode.isBYO else {
+        guard !setupMode.isSelfManaged else {
             openRoute(.modelSettings)
             return
         }
@@ -352,7 +352,7 @@ struct SettingsView: View {
         provider: AgentModelProviderOption,
         model: AgentModelOption
     ) async {
-        guard !setupMode.isBYO else { return }
+        guard !setupMode.isSelfManaged else { return }
         guard !model.isLocked else { return }
         guard !modelSettingsSaving else { return }
         modelSettingsSaving = true
