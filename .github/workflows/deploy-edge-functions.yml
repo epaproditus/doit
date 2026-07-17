@@ -43,19 +43,21 @@ jobs:
           SUPABASE_PROJECT_REF: qjeutitqgdsasccxfxdy
         run: |
           echo "==> Linking to dev project: $SUPABASE_PROJECT_REF"
-          supabase link --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null || {
-            if [ -n "$SUPABASE_DB_PASSWORD" ]; then
-              echo "  PAT failed, trying DB password fallback..."
-              supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
-            else
-              echo "  PAT link failed and no DB password available."
-              echo "  Continuing anyway — migrations will be skipped."
-            fi
-          }
+          LINK_OK=false
+          supabase link --project-ref "$SUPABASE_PROJECT_REF" 2>/dev/null && LINK_OK=true || true
+
+          if [ "$LINK_OK" != "true" ] && [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            echo "  PAT failed, trying DB password fallback..."
+            supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD" && LINK_OK=true || true
+          fi
 
           if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.apply_migrations }}" == "true" ]]; then
-            echo "==> Applying pending migrations..."
-            supabase db push --project-ref "$SUPABASE_PROJECT_REF" || echo "  ⚠️  db push failed (may need service_role key)"
+            if [ "$LINK_OK" == "true" ]; then
+              echo "==> Applying pending migrations..."
+              supabase db push --linked || echo "  ⚠️  db push failed (may need service_role key)"
+            else
+              echo "  ⚠️  Cannot apply migrations — project not linked (no valid PAT or DB password)."
+            fi
           fi
 
           FUNCTIONS="${{ github.event.inputs.functions }}"
@@ -123,8 +125,12 @@ jobs:
           fi
 
           if [[ "${{ github.event_name }}" == "push" || "${{ github.event.inputs.apply_migrations }}" == "true" ]]; then
-            echo "==> Applying pending migrations..."
-            supabase db push --project-ref "$SUPABASE_PROJECT_REF" || echo "  ⚠️  db push failed (may need service_role key)"
+            if [ "$LINK_OK" == "true" ]; then
+              echo "==> Applying pending migrations..."
+              supabase db push --linked || echo "  ⚠️  db push failed (may need service_role key)"
+            else
+              echo "  ⚠️  Cannot apply migrations — project not linked (no valid PAT or DB password)."
+            fi
           fi
 
           FUNCTIONS="${{ github.event.inputs.functions }}"
