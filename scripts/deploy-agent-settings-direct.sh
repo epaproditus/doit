@@ -81,8 +81,8 @@ if [ -z "$ANON_KEY" ]; then
 fi
 
 if [ -z "$SERVICE_ROLE_KEY" ]; then
-    warn "DOIT_SUPABASE_SERVICE_ROLE_KEY not set. Secrets step will fail."
-    warn "Get the service_role key from Supabase Dashboard > Settings > API"
+    warn "DOIT_SUPABASE_SERVICE_ROLE_KEY not set. Not needed — the function uses"
+    warn "  user-level auth with RLS (migration #44). Secrets step will be skipped."
 fi
 
 # Verify PAT works
@@ -166,9 +166,28 @@ fi
 echo ""
 info "[3/4] Setting Edge Function secrets..."
 
-# Secrets are managed via the Management API
-SECRETS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-    "$API_BASE/projects/$PROJECT_REF/secrets" \
+if [ -z "$SERVICE_ROLE_KEY" ]; then
+    # Function now uses user-level auth via RLS (migration #44).
+    # Only set URL and anon key — the service_role key is no longer needed.
+    warn "  No SERVICE_ROLE_KEY — setting only SUPABASE_URL + SUPABASE_ANON_KEY."
+    SECRETS_PAYLOAD="{
+        \"secrets\": [
+            {\"name\":\"SUPABASE_URL\",\"value\":\"$SUPABASE_URL\"},
+            {\"name\":\"SUPABASE_ANON_KEY\",\"value\":\"$ANON_KEY\"}
+        ]
+    }"
+else
+    SECRETS_PAYLOAD="{
+        \"secrets\": [
+            {\"name\":\"SUPABASE_URL\",\"value\":\"$SUPABASE_URL\"},
+            {\"name\":\"SUPABASE_ANON_KEY\",\"value\":\"$ANON_KEY\"},
+            {\"name\":\"SUPABASE_SERVICE_ROLE_KEY\",\"value\":\"$SERVICE_ROLE_KEY\"}
+        ]
+    }"
+fi
+
+SECRETS_RESP=$(curl -s -w "\\n%{http_code}" -X POST \\
+    "$API_BASE/projects/$PROJECT_REF/secrets" \\
     -H "Authorization: Bearer $SUPABASE_PAT" \
     -H "Content-Type: application/json" \
     -d "{
