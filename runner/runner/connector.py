@@ -56,13 +56,52 @@ def _endpoint_parts(url: str) -> tuple[str, int]:
     return parsed.hostname, parsed.port or default_port
 
 
-def _capabilities(*, hermes_status: str = "unchecked") -> dict[str, str]:
-    return {
+def _read_hermes_config(profile_name: str) -> dict[str, str]:
+    """Read the current provider and model from the profile's config.yaml."""
+    profile_dir = _profiles_dir() / profile_name
+    config_path = profile_dir / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import-untyped]
+        raw = config_path.read_text()
+        cfg = yaml.safe_load(raw)
+        if not isinstance(cfg, dict):
+            return {}
+        model_cfg = cfg.get("model", {})
+        if not isinstance(model_cfg, dict):
+            return {}
+        result: dict[str, str] = {}
+        provider = model_cfg.get("provider")
+        if provider:
+            result["provider"] = str(provider)
+        default = model_cfg.get("default")
+        if default:
+            result["model"] = str(default)
+        base_url = model_cfg.get("base_url")
+        if base_url:
+            result["base_url"] = str(base_url)
+        return result
+    except Exception:
+        return {}
+
+
+def _capabilities(
+    *,
+    hermes_status: str = "unchecked",
+    profile_name: str = "",
+) -> dict[str, object]:
+    caps: dict[str, object] = {
         "Hermes": hermes_status,
         "Models": "managed by your Hermes",
         "Memory": "local to your Hermes profile",
         "Integrations": "managed by your Hermes",
     }
+    if profile_name:
+        hc = _read_hermes_config(profile_name)
+        if hc:
+            caps["hermes_config"] = hc
+    return caps
 
 
 def _friendly_hermes_error(endpoint: HermesEndpoint, exc: BaseException) -> str:
@@ -209,7 +248,7 @@ async def _heartbeat_loop(
         resp = await api.heartbeat(
             profile_name=profile_name,
             endpoint_url=endpoint_url,
-            capabilities=_capabilities(hermes_status=hermes_status),
+            capabilities=_capabilities(hermes_status=hermes_status, profile_name=profile_name),
         )
         # Apply any pending model setting (at most one per heartbeat tick)
         pending = resp.get("pending_model_setting")
@@ -327,7 +366,7 @@ async def connector_loop() -> None:
     await api.register(
         profile_name=args.profile_name,
         endpoint_url=args.hermes_url,
-        capabilities=_capabilities(hermes_status=initial_hermes_status),
+        capabilities=_capabilities(hermes_status=initial_hermes_status, profile_name=args.profile_name),
     )
 
     gates = UserGates()

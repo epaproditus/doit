@@ -12,7 +12,7 @@ struct ModelSettingsView: View {
     @State private var saving = false
     @State private var error: String?
 
-    // Remote Hermes config for self-managed mode
+    // Remote Hermes config for self-managed mode (loaded via edge function)
     @State private var remoteConfig: BYOHermesConfig?
     @State private var remoteConfigLoading = false
     @State private var remoteConfigError: String?
@@ -228,18 +228,33 @@ struct ModelSettingsView: View {
         loading = true
         defer { loading = false }
         
-        // In self-managed mode, fetch remote config from the Hermes API server
+        // In self-managed mode, try edge function first, then direct API
         guard !setupMode.isSelfManaged else {
             error = nil
             connectivity.reportSuccess()
             
-            // Fetch remote config if we have a base URL
+            remoteConfigLoading = true
+            defer { remoteConfigLoading = false }
+            
+            // 1. Try the edge function (reads from connector heartbeat capabilities)
+            do {
+                if let config = try await AgentSettingsAPI.getConnectorConfig() {
+                    remoteConfig = config
+                    remoteConfigError = nil
+                    byoProvider = config.provider
+                    byoModel = config.model
+                    connectivity.reportSuccess()
+                    return
+                }
+            } catch {
+                // Edge function failed — fall through to direct API
+                remoteConfigError = nil
+            }
+            
+            // 2. Fall back to direct Hermes API if we have a base URL
             guard !byoBaseURL.trimmingCharacters(in: .whitespaces).isEmpty else {
                 return
             }
-            
-            remoteConfigLoading = true
-            defer { remoteConfigLoading = false }
             
             do {
                 let config = try await BYOModelSettingsAPI.getConfig(baseURL: byoBaseURL)

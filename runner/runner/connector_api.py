@@ -43,7 +43,7 @@ class ConnectorAPI:
         *,
         profile_name: str,
         endpoint_url: str,
-        capabilities: dict[str, str],
+        capabilities: dict[str, object],
     ) -> dict[str, Any]:
         return await self.call(
             "register",
@@ -57,7 +57,7 @@ class ConnectorAPI:
         *,
         profile_name: str,
         endpoint_url: str,
-        capabilities: dict[str, str],
+        capabilities: dict[str, object],
     ) -> dict[str, Any]:
         return await self.call(
             "heartbeat",

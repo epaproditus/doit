@@ -270,6 +270,19 @@ serve(async (req) => {
                     default_selection: DEFAULT_SELECTION,
                 });
             }
+            case "get_connector_config": {
+                // Read the connector's capabilities (stored as jsonb during heartbeat).
+                // The connector includes hermes_config with provider/model/base_url.
+                const { data, error } = await userClient
+                    .from("byo_connectors")
+                    .select("capabilities")
+                    .eq("user_id", userId)
+                    .maybeSingle();
+                if (error) throw error;
+                const caps = data?.capabilities as Record<string, unknown> | undefined;
+                const hermes_config = caps?.hermes_config as Record<string, string> | undefined;
+                return json({ hermes_config: hermes_config ?? null });
+            }
             case "update": {
                 const premiumModelAccess = await hasPremiumModelAccess(userClient, userId);
                 const baseUrl = body.base_url ?? null;

@@ -9,6 +9,14 @@ enum AgentSettingsAPI {
             .invoke("agent-settings", options: .init(body: Body(action: "get")))
     }
 
+    static func getConnectorConfig() async throws -> BYOHermesConfig? {
+        struct Body: Codable { let action: String }
+        struct Resp: Codable { let hermes_config: BYOHermesConfig? }
+        let resp: Resp = try await Supa.client.functions
+            .invoke("agent-settings", options: .init(body: Body(action: "get_connector_config")))
+        return resp.hermes_config
+    }
+
     static func updateModelSettings(
         provider: String,
         model: String,
