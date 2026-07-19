@@ -125,6 +125,8 @@ struct SettingsView: View {
                         SettingsDivider(leadingPadding: 66)
                         settingsRouteButton(.memory)
                         SettingsDivider(leadingPadding: 66)
+                        settingsRouteButton(.bible)
+                        SettingsDivider(leadingPadding: 66)
                         settingsRouteButton(.feedback)
                     }
 
@@ -479,6 +481,7 @@ enum SettingsRoute: Hashable {
     case connections
     case memory
     case feedback
+    case bible
 
     var title: String {
         switch self {
@@ -490,6 +493,7 @@ enum SettingsRoute: Hashable {
         case .connections: return "Connections"
         case .memory: return "Memory"
         case .feedback: return "Feedback"
+        case .bible: return "Bible"
         }
     }
 
@@ -501,6 +505,7 @@ enum SettingsRoute: Hashable {
         case .connections: return "arrow.left.arrow.right"
         case .memory: return "book.pages"
         case .feedback: return "ladybug.fill"
+        case .bible: return "book"
         }
     }
 
@@ -523,6 +528,8 @@ enum SettingsRoute: Hashable {
             MemoryView()
         case .feedback:
             FeedbackView()
+        case .bible:
+            BibleView()
         }
     }
 }
