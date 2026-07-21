@@ -52,9 +52,17 @@ enum TodoRealtimeHub {
         var onAgentActivityDelete: (UUID) async -> Void = { _ in }
         var onMemoryChange: (UUID) async -> Void = { _ in }
         var onMemoryDelete: (UUID) async -> Void = { _ in }
+        /// Fires for `conversations` insert/update/delete.
+        var onConversationChange: (UUID) async -> Void = { _ in }
+        var onConversationDelete: (UUID) async -> Void = { _ in }
         /// Fallback when we can't pull a row id out of the payload —
         /// the store should run a full `loadAll()`.
         var onUnknown: () async -> Void = {}
+    }
+
+    /// Per-conversation handlers for the chat detail view.
+    struct ConversationWatchHandlers {
+        var onMessages: () async -> Void = {}
     }
 
     /// Per-todo handlers for the detail view's chat-only tables.
@@ -84,6 +92,10 @@ enum TodoRealtimeHub {
     private static var cronWatchID: UUID?
     private static var cronHandlers = CronJobWatchHandlers()
     private static var cronTasks: [String: Task<Void, Never>] = [:]
+
+    private static var conversationWatchID: UUID?
+    private static var conversationHandlers = ConversationWatchHandlers()
+    private static var conversationTasks: [String: Task<Void, Never>] = [:]
 
     // MARK: - User feed (todo list)
 
@@ -194,6 +206,37 @@ enum TodoRealtimeHub {
         cronTasks.removeAll()
         cronWatchID = nil
         cronHandlers = CronJobWatchHandlers()
+    }
+
+    // MARK: - Conversation detail feed
+
+    static func beginConversationWatch(conversationID: UUID, handlers: ConversationWatchHandlers) {
+        conversationHandlers = handlers
+        if conversationWatchID == conversationID, !conversationTasks.isEmpty {
+            print("[realtime][hub] conversation watch handlers updated conv=\(conversationID)")
+            return
+        }
+        endConversationWatch()
+        conversationWatchID = conversationID
+        print("[realtime][hub] starting conversation watch conv=\(conversationID)")
+        startChannel(
+            key: "conv_messages",
+            channelName: "conv_messages:\(conversationID.uuidString)",
+            table: "conversation_messages",
+            filter: "conversation_id=eq.\(conversationID.uuidString)",
+            tasks: &conversationTasks,
+            onAction: { _ in await conversationHandlers.onMessages() },
+            onReconnect: { await conversationHandlers.onMessages() }
+        )
+    }
+
+    static func endConversationWatch() {
+        guard conversationWatchID != nil || !conversationTasks.isEmpty else { return }
+        print("[realtime][hub] ending conversation watch conv=\(conversationWatchID?.uuidString ?? "nil")")
+        for (_, task) in conversationTasks { task.cancel() }
+        conversationTasks.removeAll()
+        conversationWatchID = nil
+        conversationHandlers = ConversationWatchHandlers()
     }
 
     // MARK: - Loops
@@ -319,6 +362,29 @@ enum TodoRealtimeHub {
         case .delete(let a):
             if let todoID = uuid(from: a.oldRecord, key: "todo_id") {
                 await userHandlers.onAgentActivityDelete(todoID)
+            } else {
+                await userHandlers.onUnknown()
+            }
+        }
+    }
+
+    private static func handleConversationAction(_ action: AnyAction) async {
+        switch action {
+        case .insert(let a):
+            if let id = uuid(from: a.record, key: "id") {
+                await userHandlers.onConversationChange(id)
+            } else {
+                await userHandlers.onUnknown()
+            }
+        case .update(let a):
+            if let id = uuid(from: a.record, key: "id") {
+                await userHandlers.onConversationChange(id)
+            } else {
+                await userHandlers.onUnknown()
+            }
+        case .delete(let a):
+            if let id = uuid(from: a.oldRecord, key: "id") {
+                await userHandlers.onConversationDelete(id)
             } else {
                 await userHandlers.onUnknown()
             }
@@ -536,6 +602,12 @@ enum TodoRealtimeHub {
                 table: "memories",
                 filter: userFilter
             )
+            let conversations = channel.postgresChange(
+                AnyAction.self,
+                schema: "public",
+                table: "conversations",
+                filter: userFilter
+            )
 
             do {
                 try await channel.subscribeWithError()
@@ -590,6 +662,13 @@ enum TodoRealtimeHub {
                         label: "memories",
                         stream: memories,
                         onAction: handleMemoryAction
+                    )
+                }
+                group.addTask {
+                    await consumeStream(
+                        label: "conversations",
+                        stream: conversations,
+                        onAction: handleConversationAction
                     )
                 }
             }

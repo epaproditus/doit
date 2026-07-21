@@ -3901,6 +3901,18 @@ async def main_loop() -> None:
             )
             continue
 
+        # Chat-mode conversations: poll at a reduced rate (every ~5 ticks)
+        # so we don't swamp the DB checking for new messages.
+        if not hasattr(main_loop, "_last_chat_poll"):
+            main_loop._last_chat_poll = 0.0
+        if now - main_loop._last_chat_poll >= max(cfg.poll_interval_secs * 5, 10.0):
+            main_loop._last_chat_poll = now
+            try:
+                from .chat import poll_and_process_chat_conversations
+                await poll_and_process_chat_conversations(db, cfg)
+            except Exception:
+                log.exception("chat poll failed")
+
         await asyncio.sleep(cfg.poll_interval_secs)
 
 

@@ -4,6 +4,9 @@ struct RootView: View {
     @Environment(AuthModel.self) private var auth
     @Environment(AppSetupModeStore.self) private var setupMode
     @Environment(OnboardingModel.self) private var onboarding
+    @Environment(ConversationStore.self) private var conversationStore
+
+    @State private var selectedTab = 0
 
     var body: some View {
         if let mode = setupMode.mode {
@@ -22,7 +25,7 @@ struct RootView: View {
                             SetupModeView()
                         case .signedIn(let userID):
                             if onboarding.isReady {
-                                TodoListView(userID: userID)
+                                mainTabView(userID: userID)
                             } else {
                                 OnboardingView()
                             }
@@ -48,10 +51,31 @@ struct RootView: View {
             SignInView()
         case .signedIn(let userID):
             if onboarding.isReady {
-                TodoListView(userID: userID)
+                mainTabView(userID: userID)
             } else {
                 OnboardingView()
             }
+        }
+    }
+
+    @ViewBuilder
+    private func mainTabView(userID: UUID) -> some View {
+        TabView(selection: $selectedTab) {
+            ChatListView(userID: userID)
+                .tabItem {
+                    Label("Chat", systemImage: "message")
+                }
+                .tag(0)
+
+            TodoListView(userID: userID)
+                .tabItem {
+                    Label("Tasks", systemImage: "checklist")
+                }
+                .tag(1)
+        }
+        .tint(AppSemanticColors.accentColor)
+        .task {
+            conversationStore.start(userID: userID)
         }
     }
 

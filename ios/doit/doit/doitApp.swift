@@ -17,6 +17,7 @@ struct doitApp: App {
     /// unprovisioned user never has tasks stuck on "Preparing…".
     @State private var onboarding = OnboardingModel()
     @State private var connectivity = ConnectivityMonitor()
+    @State private var conversationStore = ConversationStore()
 
     var body: some Scene {
         WindowGroup {
@@ -27,6 +28,7 @@ struct doitApp: App {
                 .environment(todoStore)
                 .environment(onboarding)
                 .environment(connectivity)
+                .environment(conversationStore)
                 .overlay(alignment: .top) {
                     if connectivity.showBanner {
                         ConnectivityToast()
@@ -57,6 +59,7 @@ struct doitApp: App {
                         )
                     case .signedOut:
                         todoStore.stop()
+                        conversationStore.stop()
                         onboarding.reset()
                         connectivity.stop()
                         connectivity.start()

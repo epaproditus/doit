@@ -1300,6 +1300,148 @@ class DB:
             return []
 
     # ------------------------------------------------------------------
+    # Conversations (Hybrid Chat Mode)
+    # ------------------------------------------------------------------
+
+    def create_conversation(
+        self,
+        user_id: str,
+        title: str = "New conversation",
+    ) -> dict | None:
+        """Create a new conversation row. Returns the created row or None."""
+        try:
+            resp = (
+                self._client.table("conversations")
+                .insert({"user_id": user_id, "title": title})
+                .execute()
+            )
+            return resp.data[0] if resp.data else None
+        except Exception as e:
+            log.error("create_conversation failed: %s", e)
+            return None
+
+    def list_conversations(self, user_id: str) -> list[dict]:
+        """Active conversations for a user, most-recently-updated first."""
+        try:
+            resp = (
+                self._client.table("conversations")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("status", "active")
+                .order("updated_at", desc=True)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            log.error("list_conversations(%s) failed: %s", user_id, e)
+            return []
+
+    def get_conversation(self, conversation_id: str) -> dict | None:
+        try:
+            resp = (
+                self._client.table("conversations")
+                .select("*")
+                .eq("id", conversation_id)
+                .single()
+                .execute()
+            )
+            return resp.data
+        except Exception as e:
+            log.error("get_conversation(%s) failed: %s", conversation_id, e)
+            return None
+
+    def upsert_conversation_session(
+        self,
+        conversation_id: str,
+        hermes_session_id: str,
+    ) -> None:
+        """Stamp the Hermes session id on a conversation (first message or resume)."""
+        try:
+            self._client.table("conversations").update(
+                {"hermes_session_id": hermes_session_id}
+            ).eq("id", conversation_id).execute()
+        except Exception as e:
+            log.error(
+                "upsert_conversation_session(%s) failed: %s",
+                conversation_id,
+                e,
+            )
+
+    def upsert_conversation_run(
+        self,
+        conversation_id: str,
+        hermes_run_id: str,
+    ) -> None:
+        """Stamp the current/last Hermes run id on a conversation."""
+        try:
+            self._client.table("conversations").update(
+                {"hermes_run_id": hermes_run_id}
+            ).eq("id", conversation_id).execute()
+        except Exception as e:
+            log.error(
+                "upsert_conversation_run(%s) failed: %s",
+                conversation_id,
+                e,
+            )
+
+    def insert_conversation_message(
+        self,
+        conversation_id: str,
+        user_id: str,
+        role: str,
+        body: str,
+        payload: dict | None = None,
+    ) -> dict | None:
+        """Insert a message into a conversation. Returns the created row."""
+        row: dict[str, str | dict] = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "role": role,
+            "body": body,
+        }
+        if payload:
+            row["payload"] = payload
+        try:
+            resp = (
+                self._client.table("conversation_messages")
+                .insert(row)
+                .execute()
+            )
+            return resp.data[0] if resp.data else None
+        except Exception as e:
+            log.error(
+                "insert_conversation_message(%s) failed: %s",
+                conversation_id,
+                e,
+            )
+            return None
+
+    def list_conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Messages for a conversation, oldest first."""
+        try:
+            resp = (
+                self._client.table("conversation_messages")
+                .select("*")
+                .eq("conversation_id", conversation_id)
+                .order("created_at")
+                .limit(limit)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            log.error(
+                "list_conversation_messages(%s) failed: %s",
+                conversation_id,
+                e,
+            )
+            return []
+
+    # ------------------------------------------------------------------
     # Artifacts (user-visible deliverables)
     # ------------------------------------------------------------------
 
